@@ -1,6 +1,8 @@
-
 streamlit
+pandas
 numpy
-scipy
 matplotlib
-streamlit
+openpyxl
+xlsxwriter
+scipy
+plotly
