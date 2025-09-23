@@ -85,9 +85,22 @@ def suggest_impeller(material):
         'Seawater': 'Bronze open impeller',
         'Acids': 'PVDF or Stainless steel semi-open impeller',
         'Slurry': 'High-chrome open impeller',
-        'Food-grade': 'Stainless steel closed impeller'
+        'Food-grade': 'Stainless steel closed impeller',
+        'Oil Transfer': 'Cast Iron or Stainless Steel' # Added Oil Transfer impeller suggestion
     }
     return mapping.get(material, 'Consult vendor')
+
+def suggest_density_range(fluid_type):
+    """Suggest density range based on fluid type"""
+    ranges = {
+        'Water, non-corrosive': (990, 1000), # kg/m³
+        'Seawater': (1020, 1030),
+        'Acids': (1050, 1840), # Depends heavily on acid type and concentration
+        'Slurry': (1100, 2000), # Highly variable
+        'Food-grade': (1000, 1500), # Depends on product
+        'Oil Transfer': (700, 950) # Depends on oil type
+    }
+    return ranges.get(fluid_type, (None, None))
 
 
 def compute_bep(Q_points, eff_curve):
@@ -168,9 +181,15 @@ if page == "Rotating Pumps (Centrifugal etc.)":
         Q_input = st.number_input("Flow rate", value=100.0, min_value=0.0, format="%.6f")
         Q_unit = st.selectbox("Flow unit", ['m³/h', 'L/s', 'm³/s', 'm³/d', 'GPM (US)'], index=0)
         T = st.number_input("Fluid temperature (°C)", value=25.0)
+        material_type = st.selectbox("Fluid type", ['Water, non-corrosive', 'Seawater', 'Acids', 'Slurry', 'Food-grade', 'Oil Transfer']) # Moved fluid type here
         SG = st.number_input("Specific gravity (relative to water)", value=1.0, min_value=0.01)
         mu_cP = st.number_input("Viscosity (cP)", value=1.0, min_value=0.01)
         density = 1000.0 * SG
+
+        density_range = suggest_density_range(material_type)
+        if density_range[0] is not None:
+            st.info(f"Suggested density range for {material_type}: {density_range[0]:.0f} - {density_range[1]:.0f} kg/m³")
+
 
         if st.checkbox("Override density (kg/m³)?", value=False):
             density = st.number_input("Density (kg/m³)", value=1000.0, min_value=0.1)
@@ -197,7 +216,7 @@ if page == "Rotating Pumps (Centrifugal etc.)":
 
         st.markdown("---")
         st.subheader("Application & Materials")
-        material_type = st.selectbox("Fluid type for impeller suggestion", ['Water, non-corrosive', 'Seawater', 'Acids', 'Slurry', 'Food-grade', 'Oil Transfer'])
+        # material_type = st.selectbox("Fluid type for impeller suggestion", ['Water, non-corrosive', 'Seawater', 'Acids', 'Slurry', 'Food-grade', 'Oil Transfer']) # Moved fluid type here
         application = st.selectbox("Application Type", ['General Transfer', 'Chemical Handling', 'Slurry Transport', 'Oil Transfer', 'High Pressure', 'Metering'])
 
 
