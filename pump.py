@@ -81,12 +81,15 @@ def pump_power_required(rho, g, Q, H, pump_efficiency, motor_efficiency=0.95):
 def suggest_impeller(material):
     """Suggest impeller type based on material"""
     mapping = {
-        'Water, non-corrosive': 'Cast iron closed impeller',
+        'Water': 'Cast iron closed impeller',
         'Seawater': 'Bronze open impeller',
         'Acids': 'PVDF or Stainless steel semi-open impeller',
         'Slurry': 'High-chrome open impeller',
         'Food-grade': 'Stainless steel closed impeller',
-        'Oil Transfer': 'Cast Iron or Stainless Steel' # Added Oil Transfer impeller suggestion
+        'Oil': 'Cast Iron or Stainless Steel',
+        'Alkaline': 'Stainless Steel or hastelloy',
+        'More': 'Consult vendor'
+
     }
     return mapping.get(material, 'Consult vendor')
 
@@ -166,7 +169,7 @@ def create_excel_report_vacuum(df_vac, fig_png_bytes):
             if fig_png_bytes is not None:
                 workbook = writer.book
                 worksheet = writer.sheets['Vacuum']
-                worksheet.insert_image('G2', 'vacuum_curve.png', {'image_data': io.BytesIO(fig_png_bytes)})
+                worksheet.insert_image('G2', 'vacuum_curve.png', {'image_data': io.BytesIO(fig_c_png)})
 
         output.seek(0)
         return output.getvalue()
@@ -564,6 +567,9 @@ elif page == "Vacuum Pump Calculator":
         st.subheader("Pump/Process Constraints")
         available_pumping_speed_Ls = st.number_input("Available pumping speed (L/s) if known (0 to auto-calc)", value=0.0, min_value=0.0)
         suggest_backing = st.checkbox("Suggest backing pump for high vacuum (turbo+backing)", value=True)
+        vacuum_pump_eff = st.number_input("Vacuum pump efficiency (%) [if known]", value=70.0, min_value=1.0, max_value=100.0)/100.0 # Added vacuum pump efficiency
+        vacuum_motor_eff = st.number_input("Vacuum motor efficiency (%)", value=95.0, min_value=10.0, max_value=100.0)/100.0 # Added vacuum motor efficiency
+
 
         submitted_vac = st.form_submit_button("Calculate Vacuum Requirements")
 
@@ -614,6 +620,14 @@ elif page == "Vacuum Pump Calculator":
                 tau_sec = np.inf
                 t_to_target_sec = np.inf
 
+            # Vacuum pump power calculation (simplified)
+            # Power (W) = Pressure (Pa) * Volume flow (m3/s) / Pump Efficiency
+            vacuum_shaft_watts = P_target_Pa * S_required_m3_s / vacuum_pump_eff if vacuum_pump_eff > 0 else np.inf
+            vacuum_electrical_watts = vacuum_shaft_watts / vacuum_motor_eff if vacuum_motor_eff > 0 else np.inf
+
+            vacuum_shaft_kW = vacuum_shaft_watts / 1000.0 if not np.isinf(vacuum_shaft_watts) else np.inf
+            vacuum_electrical_kW = vacuum_electrical_watts / 1000.0 if not np.isinf(vacuum_electrical_watts) else np.inf
+
 
             # Suggest pump types by pressure range and throughput
             pump_type_suggestion = []
@@ -659,7 +673,9 @@ elif page == "Vacuum Pump Calculator":
                         'Molecular conductance (L/s)',
                         'Effective pumping speed (L/s)',
                         'Time constant τ (s)',
-                        'Pump-down time (min)'
+                        'Pump-down time (min)',
+                        'Estimated Shaft Power (kW)', # Added vacuum power to results
+                        'Estimated Electrical Power (kW)' # Added vacuum power to results
                     ],
                     'Value': [
                         f"{chamber_volume_m3:.4f}",
@@ -673,7 +689,9 @@ elif page == "Vacuum Pump Calculator":
                         f"{C_molecular_Ls:.2f}" if not np.isinf(C_molecular_Ls) else "∞",
                         f"{S_effective_Ls:.2f}" if not np.isnan(S_effective_Ls) else "N/A",
                         f"{tau_sec:.1f}" if not np.isinf(tau_sec) else "∞",
-                        f"{t_to_target_sec/60.0:.1f}" if not np.isinf(t_to_target_sec) else "∞"
+                        f"{t_to_target_sec/60.0:.1f}" if not np.isinf(t_to_target_sec) else "∞",
+                        f"{vacuum_shaft_kW:.2f}" if not np.isinf(vacuum_shaft_kW) else "N/A", # Display vacuum shaft power
+                        f"{vacuum_electrical_kW:.2f}" if not np.isinf(vacuum_electrical_kW) else "N/A" # Display vacuum electrical power
                     ]
                 }
 
@@ -742,7 +760,9 @@ elif page == "Vacuum Pump Calculator":
                     'Foreline conductance (L/s)',
                     'Effective S (L/s)',
                     'Time constant (s)',
-                    'Pump-down time (min)'
+                    'Pump-down time (min)',
+                    'Estimated Shaft Power (kW)',
+                    'Estimated Electrical Power (kW)'
                 ],
                 'Value': [
                     chamber_volume_l,
@@ -752,7 +772,9 @@ elif page == "Vacuum Pump Calculator":
                     C_molecular_Ls if not np.isinf(C_molecular_Ls) else 999999,
                     S_effective_Ls if not np.isnan(S_effective_Ls) else 0,
                     tau_sec if not np.isinf(tau_sec) else 999999,
-                    t_to_target_sec/60.0 if not np.isinf(t_to_target_sec) else 999999
+                    t_to_target_sec/60.0 if not np.isinf(t_to_target_sec) else 999999,
+                    vacuum_shaft_kW if not np.isinf(vacuum_shaft_kW) else "N/A",
+                    vacuum_electrical_kW if not np.isinf(vacuum_electrical_kW) else "N/A"
                 ]
             })
 
@@ -763,6 +785,7 @@ elif page == "Vacuum Pump Calculator":
             st.write("• Conductance of piping, gas composition, water vapor loads and molecular vs viscous flow regime effects are NOT fully accounted for.")
             st.write("• For turbomolecular systems, consult vendor for foreline conductance, required backing speed, and ultimate pressure with gas load.")
             st.write("• Units: 1 mbar·L/s = 0.1 Pa·m³/s. Pumping speed is given in L/s (typical vacuum industry unit).")
+            st.write("• Vacuum pump power estimation is simplified and does not account for pump specific curves or efficiency variations with pressure/flow.")
 
 
             # Excel export for vacuum
