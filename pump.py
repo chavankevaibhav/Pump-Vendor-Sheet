@@ -175,6 +175,9 @@ if page == "Rotating Pumps (Centrifugal etc.)":
         if st.checkbox("Override density (kg/m³)?", value=False):
             density = st.number_input("Density (kg/m³)", value=1000.0, min_value=0.1)
 
+        # Display calculated density
+        st.write(f"**Calculated Density:** {density:.2f} kg/m³")
+
         st.markdown("---")
         st.subheader("Piping & Elevation")
         D_inner = st.number_input("Pipe inner diameter (mm)", value=100.0, min_value=1.0)
