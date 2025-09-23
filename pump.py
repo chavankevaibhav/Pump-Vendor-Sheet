@@ -93,12 +93,14 @@ def suggest_impeller(material):
 def suggest_density_range(fluid_type):
     """Suggest density range based on fluid type"""
     ranges = {
-        'Water, non-corrosive': (990, 1000), # kg/m³
+        'Water': (990, 1000), # kg/m³
         'Seawater': (1020, 1030),
         'Acids': (1050, 1840), # Depends heavily on acid type and concentration
         'Slurry': (1100, 2000), # Highly variable
         'Food-grade': (1000, 1500), # Depends on product
-        'Oil Transfer': (700, 950) # Depends on oil type
+        'Oil': (700, 950), # Depends on oil type
+        'Alkaline': (1050, 1500), # Depends on concentration
+        'More': (None, None) # For other types, no specific range suggested
     }
     return ranges.get(fluid_type, (None, None))
 
@@ -181,7 +183,7 @@ if page == "Rotating Pumps (Centrifugal etc.)":
         Q_input = st.number_input("Flow rate", value=100.0, min_value=0.0, format="%.6f")
         Q_unit = st.selectbox("Flow unit", ['m³/h', 'L/s', 'm³/s', 'm³/d', 'GPM (US)'], index=0)
         T = st.number_input("Fluid temperature (°C)", value=25.0)
-        material_type = st.selectbox("Fluid type", ['Water, non-corrosive', 'Seawater', 'Acids', 'Slurry', 'Food-grade', 'Oil Transfer']) # Moved fluid type here
+        material_type = st.selectbox("Fluid type", ['Water', 'Seawater', 'Acids', 'Alkaline', 'Slurry', 'Food-grade', 'Oil', 'More']) # Updated fluid type dropdown
         SG = st.number_input("Specific gravity (relative to water)", value=1.0, min_value=0.01)
         mu_cP = st.number_input("Viscosity (cP)", value=1.0, min_value=0.01)
         density = 1000.0 * SG
@@ -216,7 +218,7 @@ if page == "Rotating Pumps (Centrifugal etc.)":
 
         st.markdown("---")
         st.subheader("Application & Materials")
-        # material_type = st.selectbox("Fluid type for impeller suggestion", ['Water, non-corrosive', 'Seawater', 'Acids', 'Slurry', 'Food-grade', 'Oil Transfer']) # Moved fluid type here
+        # material_type = st.selectbox("Fluid type for impeller suggestion", ['Water', 'Seawater', 'Acids', 'Alkaline', 'Slurry', 'Food-grade', 'Oil', 'More']) # Already defined above
         application = st.selectbox("Application Type", ['General Transfer', 'Chemical Handling', 'Slurry Transport', 'Oil Transfer', 'High Pressure', 'Metering'])
 
 
@@ -272,13 +274,16 @@ if page == "Rotating Pumps (Centrifugal etc.)":
 
             # Pump type suggestion
             pump_suggestions = {
-                ('Water, non-corrosive', 'General Transfer'): 'Centrifugal Pump',
+                ('Water', 'General Transfer'): 'Centrifugal Pump',
+                ('Seawater', 'General Transfer'): 'Centrifugal Pump', # Added Seawater suggestion
                 ('Acids', 'Chemical Handling'): 'Magnetic Drive Pump',
                 ('Slurry', 'Slurry Transport'): 'Slurry Pump',
                 ('Food-grade', 'Oil Transfer'): 'Gear Pump',
                 ('Slurry', 'High Pressure'): 'Positive Displacement Pump',
-                ('Oil Transfer', 'General Transfer'): 'Centrifugal Pump',
-                ('Oil Transfer', 'High Pressure'): 'Positive Displacement Pump'
+                ('Oil', 'General Transfer'): 'Centrifugal Pump',
+                ('Oil', 'High Pressure'): 'Positive Displacement Pump',
+                 ('Alkaline', 'Chemical Handling'): 'Magnetic Drive Pump', # Added Alkaline suggestion
+                ('More', 'General Transfer'): 'Consult vendor for best selection', # Added More suggestion
             }
             pump_type = pump_suggestions.get((material_type, application), 'Consult vendor for best selection')
 
@@ -503,6 +508,11 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                     st.info("Use pumps designed for sanitary applications with polished stainless steel surfaces and FDA-approved elastomers.")
                 elif material_type == 'Oil Transfer':
                     st.info("Viscosity and temperature significantly impact oil transfer. Ensure viscosity is within the pump's operating range.")
+                elif material_type == 'Alkaline':
+                     st.warning("Handling alkaline solutions requires careful material selection for pump and piping. Ensure compatibility with the specific alkaline and concentration.")
+                     st.info("Consider stainless steel or other corrosion-resistant materials.")
+                elif material_type == 'More':
+                    st.info("For fluid types not listed, consult specific material compatibility charts and vendor recommendations.")
 
 
                 st.markdown("---")
