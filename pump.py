@@ -567,8 +567,7 @@ elif page == "Vacuum Pump Calculator":
         st.subheader("Pump/Process Constraints")
         available_pumping_speed_Ls = st.number_input("Available pumping speed (L/s) if known (0 to auto-calc)", value=0.0, min_value=0.0)
         suggest_backing = st.checkbox("Suggest backing pump for high vacuum (turbo+backing)", value=True)
-        vacuum_pump_eff = st.number_input("Vacuum pump efficiency (%) [if known]", value=70.0, min_value=1.0, max_value=100.0)/100.0 # Added vacuum pump efficiency
-        vacuum_motor_eff = st.number_input("Vacuum motor efficiency (%)", value=95.0, min_value=10.0, max_value=100.0)/100.0 # Added vacuum motor efficiency
+        # Removed vacuum_pump_eff and vacuum_motor_eff inputs
 
 
         submitted_vac = st.form_submit_button("Calculate Vacuum Requirements")
@@ -620,13 +619,7 @@ elif page == "Vacuum Pump Calculator":
                 tau_sec = np.inf
                 t_to_target_sec = np.inf
 
-            # Vacuum pump power calculation (simplified)
-            # Power (W) = Pressure (Pa) * Volume flow (m3/s) / Pump Efficiency
-            vacuum_shaft_watts = P_target_Pa * S_required_m3_s / vacuum_pump_eff if vacuum_pump_eff > 0 else np.inf
-            vacuum_electrical_watts = vacuum_shaft_watts / vacuum_motor_eff if vacuum_motor_eff > 0 else np.inf
-
-            vacuum_shaft_kW = vacuum_shaft_watts / 1000.0 if not np.isinf(vacuum_shaft_watts) else np.inf
-            vacuum_electrical_kW = vacuum_electrical_watts / 1000.0 if not np.isinf(vacuum_electrical_watts) else np.inf
+            # Removed vacuum pump power calculation
 
 
             # Suggest pump types by pressure range and throughput
@@ -673,9 +666,8 @@ elif page == "Vacuum Pump Calculator":
                         'Molecular conductance (L/s)',
                         'Effective pumping speed (L/s)',
                         'Time constant τ (s)',
-                        'Pump-down time (min)',
-                        'Estimated Shaft Power (kW)', # Added vacuum power to results
-                        'Estimated Electrical Power (kW)' # Added vacuum power to results
+                        'Pump-down time (min)'
+                        # Removed power results from table
                     ],
                     'Value': [
                         f"{chamber_volume_m3:.4f}",
@@ -689,9 +681,8 @@ elif page == "Vacuum Pump Calculator":
                         f"{C_molecular_Ls:.2f}" if not np.isinf(C_molecular_Ls) else "∞",
                         f"{S_effective_Ls:.2f}" if not np.isnan(S_effective_Ls) else "N/A",
                         f"{tau_sec:.1f}" if not np.isinf(tau_sec) else "∞",
-                        f"{t_to_target_sec/60.0:.1f}" if not np.isinf(t_to_target_sec) else "∞",
-                        f"{vacuum_shaft_kW:.2f}" if not np.isinf(vacuum_shaft_kW) else "N/A", # Display vacuum shaft power
-                        f"{vacuum_electrical_kW:.2f}" if not np.isinf(vacuum_electrical_kW) else "N/A" # Display vacuum electrical power
+                        f"{t_to_target_sec/60.0:.1f}" if not np.isinf(t_to_target_sec) else "∞"
+                        # Removed power results from table
                     ]
                 }
 
@@ -760,9 +751,7 @@ elif page == "Vacuum Pump Calculator":
                     'Foreline conductance (L/s)',
                     'Effective S (L/s)',
                     'Time constant (s)',
-                    'Pump-down time (min)',
-                    'Estimated Shaft Power (kW)',
-                    'Estimated Electrical Power (kW)'
+                    'Pump-down time (min)'
                 ],
                 'Value': [
                     chamber_volume_l,
@@ -772,9 +761,7 @@ elif page == "Vacuum Pump Calculator":
                     C_molecular_Ls if not np.isinf(C_molecular_Ls) else 999999,
                     S_effective_Ls if not np.isnan(S_effective_Ls) else 0,
                     tau_sec if not np.isinf(tau_sec) else 999999,
-                    t_to_target_sec/60.0 if not np.isinf(t_to_target_sec) else 999999,
-                    vacuum_shaft_kW if not np.isinf(vacuum_shaft_kW) else "N/A",
-                    vacuum_electrical_kW if not np.isinf(vacuum_electrical_kW) else "N/A"
+                    t_to_target_sec/60.0 if not np.isinf(t_to_target_sec) else 999999
                 ]
             })
 
