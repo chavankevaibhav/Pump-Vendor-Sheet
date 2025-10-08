@@ -1361,4 +1361,3 @@ with st.sidebar:
     st.markdown("[Pump Selection Guide](#)")
     st.markdown("[Affinity Laws](#)")
     st.markdown("[NPSH Requirements](#)")
-```
