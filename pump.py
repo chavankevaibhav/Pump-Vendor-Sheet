@@ -1381,4 +1381,3 @@ with st.sidebar:
     st.markdown("[NPSH Requirements](#)")
     # --- Added default electricity cost ---
     st.markdown("⚡ Default Electricity Cost: 10 ₹/kWh")
-```
