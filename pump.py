@@ -472,9 +472,44 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                 st.markdown("---")
                 st.subheader("🎯 Recommendations")
                 rec_col1, rec_col2 = st.columns(2)
-                with rec_col1:
-                    st.write("**Pump Type:**", suggest_impeller(material_type))
-                    st.write("**Application:**", application)
+                with rec_col2:
+                    # Show a concise Process Parameters table in the Results summary
+                    try:
+                        proc_params = {
+                            'Design Flow (m³/h)': f"{Q_design * 3600:.2f}",
+                            'Operating Flow (m³/h)': f"{Q_op * 3600:.2f}",
+                            'BEP Flow (m³/h)': f"{Q_bep * 3600:.2f}" if 'Q_bep' in locals() and not np.isnan(Q_bep) else 'N/A',
+                            'Design Head (m)': f"{total_head_design:.2f}",
+                            'Static Head (m)': f"{static_head:.2f}",
+                            'Shaft Power (kW)': f"{shaft_kW:.2f}" if 'shaft_kW' in locals() else 'N/A',
+                            'Electrical Power (kW)': f"{electrical_kW:.2f}" if 'electrical_kW' in locals() else 'N/A',
+                            'Motor Rating (kW)': f"{motor_rated_kW:.2f}" if 'motor_rated_kW' in locals() else 'N/A',
+                            'Operating Efficiency (%)': f"{eff_op*100:.1f}" if 'eff_op' in locals() and not np.isnan(eff_op) else 'N/A',
+                            'NPSHa (m)': f"{NPSHa:.2f}" if 'NPSHa' in locals() else 'N/A',
+                            'Vendor NPSHr (m)': f"{NPSHr_vendor:.2f}" if 'NPSHr_vendor' in locals() and NPSHr_vendor > 0 else 'N/A',
+                            'NPSH Margin (m)': f"{NPSH_margin:.2f}" if 'NPSH_margin' in locals() else 'N/A',
+                            'Velocity (m/s)': f"{V:.3f}" if 'V' in locals() else 'N/A',
+                            'Reynolds #': f"{Re:.0f}" if 'Re' in locals() else 'N/A',
+                            'Pipe ID (mm)': f"{D_inner:.1f}" if 'D_inner' in locals() else 'N/A',
+                            'Pipe length (m)': f"{L_pipe:.2f}" if 'L_pipe' in locals() else 'N/A',
+                            'Roughness (mm)': f"{eps_mm:.4f}" if 'eps_mm' in locals() else 'N/A',
+                            'Fittings K (total)': f"{K_fittings:.2f}" if 'K_fittings' in locals() else 'N/A',
+                            'Fluid': f"{material_type}",
+                            'Temperature (°C)': f"{T:.1f}",
+                            'Density (kg/m³)': f"{density:.1f}" if 'density' in locals() else 'N/A',
+                            'Viscosity (cP)': f"{mu_cP:.3f}" if 'mu_cP' in locals() else 'N/A',
+                            'Particle size (mm)': (f"{particle_size:.3f}" if 'particle_size' in locals() and particle_size else 'N/A'),
+                            'Pump arrangement': f"{pump_config}",
+                            'Number of pumps': f"{n_pumps}",
+                            'Pump speed (RPM)': f"{pump_speed_rpm:.0f}",
+                        }
+
+                        df_proc = pd.DataFrame(list(proc_params.items()), columns=["Parameter", "Value"])
+                        st.dataframe(df_proc, use_container_width=True, hide_index=True)
+
+                    except Exception as _err:
+                        # Fallback: inform user but don't break the UI
+                        st.warning(f"Process parameters not available: {_err}")
                     if pct_from_bep <= 10:
                         st.success("✅ Excellent: Operating within 10% of BEP")
                     elif pct_from_bep <= 20:
@@ -1381,3 +1416,97 @@ with st.sidebar:
     st.markdown("[NPSH Requirements](#)")
     # --- Added default electricity cost ---
     st.markdown("⚡ Default Electricity Cost: 10 ₹/kWh")
+    # Process Parameters quick-table (adds a user-triggered table on the Rotating Pumps page)
+    if page == "Rotating Pumps (Centrifugal etc.)":
+        if st.button("🔎 Show Process Parameters Table"):
+            try:
+                # helper to safely read widget values from session_state
+                get = lambda key, default=None: st.session_state.get(key, default)
+
+                # Read inputs (use same labels as the widgets in the form)
+                Q_input = get("Flow rate", 100.0)
+                Q_unit = get("Flow unit", "m³/h")
+                T = get("Fluid temperature (°C)", 25.0)
+                material_type = get("Fluid type", "Water")
+                SG = get("Specific gravity", 1.0)
+                mu_cP = get("Viscosity (cP)", 1.0)
+                particle_size = get("Average particle size (mm)", 0.0)
+                override_density = get("Override density (kg/m³)?", False)
+                density_user = get("Density (kg/m³)", 1000.0)
+                density = density_user if override_density else 1000.0 * SG
+
+                D_inner = get("Pipe inner diameter (mm)", 100.0)
+                L_pipe = get("Pipe length (m)", 100.0)
+                elevation_in = get("Suction elevation (m)", 0.0)
+                elevation_out = get("Discharge elevation (m)", 10.0)
+                K_fittings = get("Total K (fittings)", 2.0)
+                eps_mm = get("Roughness (mm)", 0.045)
+                pump_config = get("Pump arrangement", "Single")
+                n_pumps = get("Number of pumps", 1)
+
+                pump_eff_pct = get("Pump efficiency (%)", 70.0)
+                motor_eff_pct = get("Motor efficiency (%)", 95.0)
+                safety_margin_head_pct = get("Design margin on head (%)", 10.0)
+                safety_margin_flow_pct = get("Design margin on flow (%)", 10.0)
+                service_factor = get("Service factor", 1.15)
+                pump_speed_rpm = get("Pump speed (RPM)", 1450.0)
+
+                atm_pressure_kPa = get("Atmospheric pressure (kPa)", 101.325)
+                vapor_pressure_kPa = get("Vapor pressure (kPa)", 2.3)
+                friction_for_NPSH = get("Suction friction head (m)", 2.0)
+                NPSHr_vendor = get("Vendor NPSHr (m) [optional]", 0.0)
+
+                # Convert flow to m3/s (same conversions as main form)
+                if Q_unit == 'm³/h':
+                    Q_m3s = Q_input / 3600.0
+                elif Q_unit == 'L/s':
+                    Q_m3s = Q_input / 1000.0
+                elif Q_unit == 'm³/d':
+                    Q_m3s = Q_input / (24*3600)
+                elif Q_unit == 'GPM (US)':
+                    Q_m3s = Q_input * 0.00378541178 / 60.0
+                else:
+                    Q_m3s = Q_input
+
+                mu = mu_cP / 1000.0
+                D_m = D_inner / 1000.0
+                V = velocity_from_flow(Q_m3s, D_m)
+                Re = reynolds(density, V, D_m, mu)
+
+                # Build table
+                proc_params = {
+                    "Flow (user)": f"{Q_input} {Q_unit}",
+                    "Flow (m³/s)": f"{Q_m3s:.6e}",
+                    "Temperature (°C)": f"{T:.1f}",
+                    "Fluid type": material_type,
+                    "Specific gravity": f"{SG:.3f}",
+                    "Density (kg/m³)": f"{density:.1f}",
+                    "Viscosity (cP)": f"{mu_cP:.3f}",
+                    "Particle size (mm)": f"{particle_size:.3f}" if particle_size else "N/A",
+                    "Pipe ID (mm)": f"{D_inner:.1f}",
+                    "Pipe length (m)": f"{L_pipe:.2f}",
+                    "Elevation in / out (m)": f"{elevation_in:.2f} / {elevation_out:.2f}",
+                    "Fittings K (total)": f"{K_fittings:.2f}",
+                    "Roughness (mm)": f"{eps_mm:.4f}",
+                    "Pump arrangement": pump_config,
+                    "Number of pumps": f"{n_pumps}",
+                    "Pump efficiency (%)": f"{pump_eff_pct:.1f}",
+                    "Motor efficiency (%)": f"{motor_eff_pct:.1f}",
+                    "Design head margin (%)": f"{safety_margin_head_pct:.1f}",
+                    "Design flow margin (%)": f"{safety_margin_flow_pct:.1f}",
+                    "Service factor": f"{service_factor:.2f}",
+                    "Pump speed (RPM)": f"{pump_speed_rpm:.0f}",
+                    "Velocity (m/s)": f"{V:.3f}",
+                    "Reynolds #": f"{Re:.0f}",
+                    "Atmospheric pressure (kPa)": f"{atm_pressure_kPa:.3f}",
+                    "Vapor pressure (kPa)": f"{vapor_pressure_kPa:.3f}",
+                    "Suction friction for NPSH (m)": f"{friction_for_NPSH:.2f}",
+                    "Vendor NPSHr (m)": (f"{NPSHr_vendor:.2f}" if NPSHr_vendor > 0 else "N/A")
+                }
+
+                df_proc = pd.DataFrame(list(proc_params.items()), columns=["Parameter", "Value"])
+                with st.expander("📋 Process Parameters", expanded=True):
+                    st.dataframe(df_proc, use_container_width=True, hide_index=True)
+
+            except Exception as err:
+                st.error(f"Unable to build process table: {err}")
