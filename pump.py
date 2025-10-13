@@ -474,6 +474,7 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                 rec_col1, rec_col2 = st.columns(2)
                 with rec_col2:
                     # Show a concise Process Parameters table in the Results summary
+                    st.subheader("Process Parameter")
                     try:
                         proc_params = {
                             'Design Flow (m³/h)': f"{Q_design * 3600:.2f}",
@@ -495,7 +496,7 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                             'Roughness (mm)': f"{eps_mm:.4f}" if 'eps_mm' in locals() else 'N/A',
                             'Fittings K (total)': f"{K_fittings:.2f}" if 'K_fittings' in locals() else 'N/A',
                             'Fluid': f"{material_type}",
-                            'Temperature (°C)': f"{T:.1f}",
+                            'Temperature (°C)': f"{T:.1f}" if 'T' in locals() else 'N/A',
                             'Density (kg/m³)': f"{density:.1f}" if 'density' in locals() else 'N/A',
                             'Viscosity (cP)': f"{mu_cP:.3f}" if 'mu_cP' in locals() else 'N/A',
                             'Particle size (mm)': (f"{particle_size:.3f}" if 'particle_size' in locals() and particle_size else 'N/A'),
