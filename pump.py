@@ -217,33 +217,82 @@ def estimate_seal_life(material_type, T, V):
 
 # --- NEW: Excel Export Function ---
 def create_excel_report_rotating(results_data):
-    """Create an Excel report for Rotating Pump calculations"""
+    """Create an Excel report for Rotating Pump calculations.
+
+    Writes a Summary sheet (top-level scalars), a Curves sheet (downsampled
+    if very large), and a Process Parameters sheet when provided.
+    Returns raw bytes for Streamlit's download_button.
+    """
     import pandas as pd
     from io import BytesIO
 
-    # Create a BytesIO buffer
     buffer = BytesIO()
 
-    # Create a Pandas Excel writer using openpyxl as the engine
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        # Write summary data to the first sheet
-        summary_df = pd.DataFrame(list(results_data.items()), columns=['Parameter', 'Value'])
+        # Build summary from results_data excluding large arrays and process params
+        summary_items = []
+        for k, v in results_data.items():
+            if k in ['Q_points', 'H_pump', 'eff_curve', 'power_curve', 'Process Parameters']:
+                continue
+            # Convert numpy arrays/objects to Python types where possible
+            try:
+                if hasattr(v, 'tolist') and not isinstance(v, (str, bytes)):
+                    val = v.tolist()
+                else:
+                    val = v
+                summary_items.append((k, val))
+            except Exception:
+                summary_items.append((k, str(v)))
+
+        summary_df = pd.DataFrame(summary_items, columns=['Parameter', 'Value'])
         summary_df.to_excel(writer, sheet_name='Summary', index=False)
 
-        # Add other sheets for curves, analysis if needed
-        # Example: Add pump curves data
+        # Curves: write to separate sheet; downsample if necessary
         if 'Q_points' in results_data and 'H_pump' in results_data:
+            Q_pts = list(results_data.get('Q_points', []))
+            H_pts = list(results_data.get('H_pump', []))
+            eff_pts = list(results_data.get('eff_curve', []))
+            pwr_pts = list(results_data.get('power_curve', []))
+
+            max_rows = 1000
+            length = max(len(Q_pts), len(H_pts), len(eff_pts), len(pwr_pts))
+            if length > max_rows and length > 0:
+                step = max(1, int(length / max_rows))
+                Q_pts = Q_pts[::step]
+                H_pts = H_pts[::step]
+                eff_pts = eff_pts[::step]
+                pwr_pts = pwr_pts[::step]
+
             curve_df = pd.DataFrame({
-                'Flow (m3/h)': [q * 3600 for q in results_data['Q_points']],
-                'Head (m)': results_data['H_pump'],
-                'Efficiency (%)': [e * 100 for e in results_data['eff_curve']],
-                'Power (kW)': results_data['power_curve']
+                'Flow (m3/h)': [q * 3600 for q in Q_pts],
+                'Head (m)': H_pts,
+                'Efficiency (%)': [e * 100 for e in eff_pts],
+                'Power (kW)': pwr_pts
             })
             curve_df.to_excel(writer, sheet_name='Curves', index=False)
 
-    # Get the value from the buffer
+        # Process Parameters sheet
+        if 'Process Parameters' in results_data:
+            try:
+                pp = results_data['Process Parameters']
+                pp_items = []
+                if isinstance(pp, dict):
+                    for k, v in pp.items():
+                        pp_items.append((k, v))
+                elif isinstance(pp, (list, tuple)):
+                    for item in pp:
+                        if isinstance(item, (list, tuple)) and len(item) >= 2:
+                            pp_items.append((item[0], item[1]))
+                pp_df = pd.DataFrame(pp_items, columns=['Parameter', 'Value'])
+                pp_df.to_excel(writer, sheet_name='Process Parameters', index=False)
+            except Exception:
+                note_df = pd.DataFrame([('Process Parameters', 'Unable to export')], columns=['Parameter', 'Value'])
+                note_df.to_excel(writer, sheet_name='Process Parameters', index=False)
+
     buffer.seek(0)
-    return buffer
+    data = buffer.getvalue()
+    buffer.close()
+    return data
 # --- END EXCEL FUNCTION ---
 
 # ------------------ Rotating Pumps Page ------------------
@@ -900,43 +949,78 @@ if page == "Rotating Pumps (Centrifugal etc.)":
 
             with col_exp2:
                 if st.button("📊 Export to Excel", type="primary"):
-                    # Prepare results data for export
-                    results_data = {
-                        'Design Flow (m3/h)': Q_design * 3600,
-                        'Design Head (m)': total_head_design,
-                        'Velocity (m/s)': V,
-                        'Shaft Power (kW)': shaft_kW,
-                        'Motor Rating (kW)': motor_rated_kW,
-                        'Efficiency (%)': eff_op * 100,
-                        'NPSHa (m)': NPSHa,
-                        'NPSH Margin (m)': NPSH_margin,
-                        'Reynolds Number': Re,
-                        'Specific Speed (Ns)': Ns,
-                        'Suction Specific Speed (Nss)': Nss,
-                        'Cavitation Index (σ)': sigma,
-                        'BEP Flow (m3/h)': Q_bep * 3600,
-                        'Operating Flow (m3/h)': Q_op * 3600,
-                        'Deviation from BEP (%)': pct_from_bep,
-                        'Relative Wear Rate': wear_rate if show_wear_analysis else 'N/A',
-                        'Est. Service Life (hrs)': estimated_service_life if show_wear_analysis else 'N/A',
-                        'Vibration Risk': vibration_severity,
-                        'Pulsation Risk': pulsation_risk,
-                        'Seal Life Est. (hrs)': seal_life_hours,
-                        'Annual Energy (kWh)': annual_energy_kWh if show_energy_cost else 'N/A',
-                        'Annual Cost (₹)': annual_cost if show_energy_cost else 'N/A', # Changed currency
-                        '10-Year Energy Cost (₹)': ten_year_cost if show_energy_cost else 'N/A', # Changed currency
-                        'Q_points': Q_points,
-                        'H_pump': H_pump,
-                        'eff_curve': eff_curve,
-                        'power_curve': power_curve
-                    }
-                    excel_buffer = create_excel_report_rotating(results_data)
-                    st.download_button(
-                        label="Download Excel Report",
-                        data=excel_buffer,
-                        file_name=f"pump_sizing_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                    try:
+                        # Build Process Parameters payload
+                        proc_params_export = {
+                            'Design Flow (m3/h)': Q_design * 3600 if 'Q_design' in locals() else 'N/A',
+                            'Operating Flow (m3/h)': Q_op * 3600 if 'Q_op' in locals() else 'N/A',
+                            'BEP Flow (m3/h)': Q_bep * 3600 if 'Q_bep' in locals() and not np.isnan(Q_bep) else 'N/A',
+                            'Design Head (m)': total_head_design if 'total_head_design' in locals() else 'N/A',
+                            'Static Head (m)': static_head if 'static_head' in locals() else 'N/A',
+                            'Shaft Power (kW)': shaft_kW if 'shaft_kW' in locals() else 'N/A',
+                            'Electrical Power (kW)': electrical_kW if 'electrical_kW' in locals() else 'N/A',
+                            'Motor Rating (kW)': motor_rated_kW if 'motor_rated_kW' in locals() else 'N/A',
+                            'Operating Efficiency (%)': eff_op * 100 if 'eff_op' in locals() and not np.isnan(eff_op) else 'N/A',
+                            'NPSHa (m)': NPSHa if 'NPSHa' in locals() else 'N/A',
+                            'Vendor NPSHr (m)': NPSHr_vendor if 'NPSHr_vendor' in locals() and NPSHr_vendor > 0 else 'N/A',
+                            'NPSH Margin (m)': NPSH_margin if 'NPSH_margin' in locals() else 'N/A',
+                            'Velocity (m/s)': V if 'V' in locals() else 'N/A',
+                            'Reynolds #': Re if 'Re' in locals() else 'N/A',
+                            'Pipe ID (mm)': D_inner if 'D_inner' in locals() else 'N/A',
+                            'Pipe length (m)': L_pipe if 'L_pipe' in locals() else 'N/A',
+                            'Roughness (mm)': eps_mm if 'eps_mm' in locals() else 'N/A',
+                            'Fittings K (total)': K_fittings if 'K_fittings' in locals() else 'N/A',
+                            'Fluid': material_type if 'material_type' in locals() else 'N/A',
+                            'Temperature (°C)': T if 'T' in locals() else 'N/A',
+                            'Density (kg/m3)': density if 'density' in locals() else 'N/A',
+                            'Viscosity (cP)': mu_cP if 'mu_cP' in locals() else 'N/A',
+                            'Particle size (mm)': particle_size if 'particle_size' in locals() and particle_size else 'N/A',
+                            'Pump arrangement': pump_config if 'pump_config' in locals() else 'N/A',
+                            'Number of pumps': n_pumps if 'n_pumps' in locals() else 'N/A',
+                            'Pump speed (RPM)': pump_speed_rpm if 'pump_speed_rpm' in locals() else 'N/A',
+                        }
+
+                        results_data = {
+                            'Design Flow (m3/h)': Q_design * 3600 if 'Q_design' in locals() else 'N/A',
+                            'Design Head (m)': total_head_design if 'total_head_design' in locals() else 'N/A',
+                            'Velocity (m/s)': V if 'V' in locals() else 'N/A',
+                            'Shaft Power (kW)': shaft_kW if 'shaft_kW' in locals() else 'N/A',
+                            'Motor Rating (kW)': motor_rated_kW if 'motor_rated_kW' in locals() else 'N/A',
+                            'Efficiency (%)': eff_op * 100 if 'eff_op' in locals() and not np.isnan(eff_op) else 'N/A',
+                            'NPSHa (m)': NPSHa if 'NPSHa' in locals() else 'N/A',
+                            'NPSH Margin (m)': NPSH_margin if 'NPSH_margin' in locals() else 'N/A',
+                            'Reynolds Number': Re if 'Re' in locals() else 'N/A',
+                            'Specific Speed (Ns)': Ns if 'Ns' in locals() else 'N/A',
+                            'Suction Specific Speed (Nss)': Nss if 'Nss' in locals() else 'N/A',
+                            'Cavitation Index (σ)': sigma if 'sigma' in locals() else 'N/A',
+                            'BEP Flow (m3/h)': Q_bep * 3600 if 'Q_bep' in locals() and not np.isnan(Q_bep) else 'N/A',
+                            'Operating Flow (m3/h)': Q_op * 3600 if 'Q_op' in locals() else 'N/A',
+                            'Deviation from BEP (%)': pct_from_bep if 'pct_from_bep' in locals() else 'N/A',
+                            'Relative Wear Rate': wear_rate if 'wear_rate' in locals() else 'N/A',
+                            'Est. Service Life (hrs)': estimated_service_life if 'estimated_service_life' in locals() else 'N/A',
+                            'Vibration Risk': vibration_severity if 'vibration_severity' in locals() else 'N/A',
+                            'Pulsation Risk': pulsation_risk if 'pulsation_risk' in locals() else 'N/A',
+                            'Seal Life Est. (hrs)': seal_life_hours if 'seal_life_hours' in locals() else 'N/A',
+                            'Annual Energy (kWh)': annual_energy_kWh if 'annual_energy_kWh' in locals() else 'N/A',
+                            'Annual Cost (₹)': annual_cost if 'annual_cost' in locals() else 'N/A', # Changed currency
+                            '10-Year Energy Cost (₹)': ten_year_cost if 'ten_year_cost' in locals() else 'N/A', # Changed currency
+                            'Q_points': Q_points if 'Q_points' in locals() else [],
+                            'H_pump': H_pump if 'H_pump' in locals() else [],
+                            'eff_curve': eff_curve if 'eff_curve' in locals() else [],
+                            'power_curve': power_curve if 'power_curve' in locals() else [],
+                            'Process Parameters': proc_params_export
+                        }
+
+                        excel_bytes = create_excel_report_rotating(results_data)
+                        st.success("Excel report generated — click the button below to download.")
+                        st.download_button(
+                            label="Download Excel Report",
+                            data=excel_bytes,
+                            file_name=f"pump_sizing_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    except Exception as e_export:
+                        st.error(f"Export failed: {e_export}")
 
 
         except Exception as e:
