@@ -1,18 +1,4 @@
-Okay, I've updated the Streamlit application to use Rupees (₹) instead of Dollars ($) and set the default electricity cost to 10 ₹/kWh.
 
-Here are the key changes made:
-
-1.  **Sidebar:** The "Resources" section now shows the new default electricity cost.
-2.  **Rotating Pumps Page:**
-    *   The electricity cost input field now defaults to `10.0` and is labeled `Electricity cost (₹/kWh)`.
-    *   All cost-related metrics and dataframes now display values with the ₹ symbol (e.g., `Annual Cost`, `Potential Savings`, `10-Year Energy Cost`, `Estimated Upgrade Cost`, `Annual Savings`).
-3.  **Life Cycle Cost Analysis Page:**
-    *   The electricity cost input field now defaults to `10.0` and is labeled `Electricity (₹/kWh)`.
-    *   All cost-related metrics and the cost breakdown visualization now use the ₹ symbol (e.g., `Total Energy Cost`, `Total Maintenance`, `Total Overhauls`, `Initial Investment`, `Avg Annual Cost`, `Cumulative NPV`, `Cost Distribution` labels, `Cumulative Cost` axis label).
-
-Here is the complete, updated code:
-
-```python
 import streamlit as st
 import pandas as pd
 import numpy as np
