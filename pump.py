@@ -6,6 +6,8 @@ import math
 import matplotlib.pyplot as plt
 import io
 from datetime import datetime
+import openpyxl
+from openpyxl import Workbook
 # For Excel export (requires openpyxl or xlsxwriter)
 # For PDF export we'll use reportlab (pure-python PDF generation)
 # pip install openpyxl reportlab fpdf
@@ -328,7 +330,7 @@ def create_pdf_report_rotating(results_data):
     Uses reportlab if available. If reportlab is not installed the function
     raises an ImportError so the caller can inform the user.
     """
-    if SimpleDocTemplate is None:
+    if not REPORTLAB_AVAILABLE:
         raise ImportError("reportlab is required for PDF generation. Install with: pip install reportlab")
 
     buffer = io.BytesIO()
