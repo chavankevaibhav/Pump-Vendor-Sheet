@@ -24,7 +24,7 @@ try:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
     REPORTLAB_AVAILABLE = True
 except Exception:
     # Defer import errors until PDF feature is actually used
@@ -386,6 +386,55 @@ def create_pdf_report_rotating(results_data):
             ('GRID', (0,0), (-1,-1), 0.5, colors.black),
         ]))
         story.append(pp_table)
+
+    # Embed charts (render matplotlib figures to PNG and insert)
+    try:
+        Q_pts = np.array(results_data.get('Q_points', []))
+        H_pts = np.array(results_data.get('H_pump', []))
+        eff_pts = np.array(results_data.get('eff_curve', []))
+        pwr_pts = np.array(results_data.get('power_curve', []))
+
+        # Only render if we have Q and H data
+        if Q_pts.size and H_pts.size:
+            fig, ax = plt.subplots(figsize=(6, 3.5))
+            ax.plot(Q_pts * 3600, H_pts, 'r-', linewidth=2, label='Pump Curve')
+            ax.set_xlabel('Flow (m³/h)')
+            ax.set_ylabel('Head (m)')
+            ax.set_title('Pump Curve')
+            ax.grid(True, alpha=0.3)
+            buf = io.BytesIO()
+            plt.tight_layout()
+            fig.savefig(buf, format='png', dpi=150)
+            plt.close(fig)
+            buf.seek(0)
+            img = RLImage(buf, width=A4[0]-100, height=(A4[1]/4))
+            story.append(Spacer(1, 12))
+            story.append(img)
+
+        # Efficiency or Power figure
+        if Q_pts.size and (eff_pts.size or pwr_pts.size):
+            fig2, ax2 = plt.subplots(figsize=(6, 3.5))
+            if eff_pts.size:
+                ax2.plot(Q_pts * 3600, eff_pts * 100, 'g-', linewidth=2, label='Efficiency (%)')
+                ax2.set_ylabel('Efficiency (%)')
+            if pwr_pts.size:
+                ax3 = ax2.twinx()
+                ax3.plot(Q_pts * 3600, pwr_pts, 'purple', linewidth=2, label='Power (kW)')
+                ax3.set_ylabel('Power (kW)')
+            ax2.set_xlabel('Flow (m³/h)')
+            ax2.set_title('Efficiency & Power')
+            ax2.grid(True, alpha=0.3)
+            buf2 = io.BytesIO()
+            plt.tight_layout()
+            fig2.savefig(buf2, format='png', dpi=150)
+            plt.close(fig2)
+            buf2.seek(0)
+            img2 = RLImage(buf2, width=A4[0]-100, height=(A4[1]/4))
+            story.append(Spacer(1, 12))
+            story.append(img2)
+    except Exception:
+        # If plotting or embedding fails, continue without images
+        pass
 
     doc.build(story)
     buffer.seek(0)
@@ -1067,125 +1116,121 @@ if page == "Rotating Pumps (Centrifugal etc.)":
             col_exp1, col_exp2 = st.columns(2)
             with col_exp1:
                 if st.button("📄 Generate PDF Report", type="secondary"):
-                    try:
-                        # Build the same results_data used for Excel export (best-effort)
-                        results_data_pdf = {
-                            'Design Flow (m3/h)': Q_design * 3600 if 'Q_design' in locals() else 'N/A',
-                            'Design Head (m)': total_head_design if 'total_head_design' in locals() else 'N/A',
-                            'Velocity (m/s)': V if 'V' in locals() else 'N/A',
-                            'Shaft Power (kW)': shaft_kW if 'shaft_kW' in locals() else 'N/A',
-                            'Motor Rating (kW)': motor_rated_kW if 'motor_rated_kW' in locals() else 'N/A',
-                            'Efficiency (%)': eff_op * 100 if 'eff_op' in locals() and not np.isnan(eff_op) else 'N/A',
-                            'NPSHa (m)': NPSHa if 'NPSHa' in locals() else 'N/A',
-                            'NPSH Margin (m)': NPSH_margin if 'NPSH_margin' in locals() else 'N/A',
-                            'Reynolds Number': Re if 'Re' in locals() else 'N/A',
-                            'Specific Speed (Ns)': Ns if 'Ns' in locals() else 'N/A',
-                            'Suction Specific Speed (Nss)': Nss if 'Nss' in locals() else 'N/A',
-                            'Cavitation Index (σ)': sigma if 'sigma' in locals() else 'N/A',
-                            'BEP Flow (m3/h)': Q_bep * 3600 if 'Q_bep' in locals() and not np.isnan(Q_bep) else 'N/A',
-                            'Operating Flow (m3/h)': Q_op * 3600 if 'Q_op' in locals() else 'N/A',
-                            'Deviation from BEP (%)': pct_from_bep if 'pct_from_bep' in locals() else 'N/A',
-                            'Relative Wear Rate': wear_rate if 'wear_rate' in locals() else 'N/A',
-                            'Est. Service Life (hrs)': estimated_service_life if 'estimated_service_life' in locals() else 'N/A',
-                            'Vibration Risk': vibration_severity if 'vibration_severity' in locals() else 'N/A',
-                            'Pulsation Risk': pulsation_risk if 'pulsation_risk' in locals() else 'N/A',
-                            'Seal Life Est. (hrs)': seal_life_hours if 'seal_life_hours' in locals() else 'N/A',
-                            'Annual Energy (kWh)': annual_energy_kWh if 'annual_energy_kWh' in locals() else 'N/A',
-                            'Annual Cost (₹)': annual_cost if 'annual_cost' in locals() else 'N/A',
-                            '10-Year Energy Cost (₹)': ten_year_cost if 'ten_year_cost' in locals() else 'N/A',
-                            'Q_points': Q_points if 'Q_points' in locals() else [],
-                            'H_pump': H_pump if 'H_pump' in locals() else [],
-                            'eff_curve': eff_curve if 'eff_curve' in locals() else [],
-                            'power_curve': power_curve if 'power_curve' in locals() else [],
-                            'Process Parameters': proc_params_export if 'proc_params_export' in locals() else {}
-                        }
+                    # Build the same results_data used for Excel export
+                    results_data_pdf = {
+                        'Design Flow (m3/h)': Q_design * 3600 if 'Q_design' in locals() else 'N/A',
+                        'Design Head (m)': total_head_design if 'total_head_design' in locals() else 'N/A',
+                        'Velocity (m/s)': V if 'V' in locals() else 'N/A',
+                        'Shaft Power (kW)': shaft_kW if 'shaft_kW' in locals() else 'N/A',
+                        'Motor Rating (kW)': motor_rated_kW if 'motor_rated_kW' in locals() else 'N/A',
+                        'Efficiency (%)': eff_op * 100 if 'eff_op' in locals() and not np.isnan(eff_op) else 'N/A',
+                        'NPSHa (m)': NPSHa if 'NPSHa' in locals() else 'N/A',
+                        'NPSH Margin (m)': NPSH_margin if 'NPSH_margin' in locals() else 'N/A',
+                        'Reynolds Number': Re if 'Re' in locals() else 'N/A',
+                        'Specific Speed (Ns)': Ns if 'Ns' in locals() else 'N/A',
+                        'Suction Specific Speed (Nss)': Nss if 'Nss' in locals() else 'N/A',
+                        'Cavitation Index (σ)': sigma if 'sigma' in locals() else 'N/A',
+                        'BEP Flow (m3/h)': Q_bep * 3600 if 'Q_bep' in locals() and not np.isnan(Q_bep) else 'N/A',
+                        'Operating Flow (m3/h)': Q_op * 3600 if 'Q_op' in locals() else 'N/A',
+                        'Deviation from BEP (%)': pct_from_bep if 'pct_from_bep' in locals() else 'N/A',
+                        'Relative Wear Rate': wear_rate if 'wear_rate' in locals() else 'N/A',
+                        'Est. Service Life (hrs)': estimated_service_life if 'estimated_service_life' in locals() else 'N/A',
+                        'Vibration Risk': vibration_severity if 'vibration_severity' in locals() else 'N/A',
+                        'Pulsation Risk': pulsation_risk if 'pulsation_risk' in locals() else 'N/A',
+                        'Seal Life Est. (hrs)': seal_life_hours if 'seal_life_hours' in locals() else 'N/A',
+                        'Annual Energy (kWh)': annual_energy_kWh if 'annual_energy_kWh' in locals() else 'N/A',
+                        'Annual Cost (₹)': annual_cost if 'annual_cost' in locals() else 'N/A',
+                        '10-Year Energy Cost (₹)': ten_year_cost if 'ten_year_cost' in locals() else 'N/A',
+                        'Q_points': Q_points if 'Q_points' in locals() else [],
+                        'H_pump': H_pump if 'H_pump' in locals() else [],
+                        'eff_curve': eff_curve if 'eff_curve' in locals() else [],
+                        'power_curve': power_curve if 'power_curve' in locals() else [],
+                        'Process Parameters': proc_params_export if 'proc_params_export' in locals() else {}
+                    }
+                    if REPORTLAB_AVAILABLE:
                         pdf_bytes = create_pdf_report_rotating(results_data_pdf)
-                        st.success("PDF generated — click below to download.")
                         st.download_button(
                             label="Download PDF Report",
                             data=pdf_bytes,
                             file_name=f"pump_sizing_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                            mime="application/pdf"
+                            mime="application/pdf",
                         )
-                    except ImportError as imp_err:
-                        st.error(str(imp_err))
-                    except Exception as pdf_err:
-                        st.error(f"PDF generation failed: {pdf_err}")
+                    else:
+                        st.error("PDF generation requires reportlab. Install with: pip install reportlab")
 
             with col_exp2:
                 if st.button("📊 Export to Excel", type="primary"):
-                    try:
-                        # Build Process Parameters payload
-                        proc_params_export = {
-                            'Design Flow (m3/h)': Q_design * 3600 if 'Q_design' in locals() else 'N/A',
-                            'Operating Flow (m3/h)': Q_op * 3600 if 'Q_op' in locals() else 'N/A',
-                            'BEP Flow (m3/h)': Q_bep * 3600 if 'Q_bep' in locals() and not np.isnan(Q_bep) else 'N/A',
-                            'Design Head (m)': total_head_design if 'total_head_design' in locals() else 'N/A',
-                            'Static Head (m)': static_head if 'static_head' in locals() else 'N/A',
-                            'Shaft Power (kW)': shaft_kW if 'shaft_kW' in locals() else 'N/A',
-                            'Electrical Power (kW)': electrical_kW if 'electrical_kW' in locals() else 'N/A',
-                            'Motor Rating (kW)': motor_rated_kW if 'motor_rated_kW' in locals() else 'N/A',
-                            'Operating Efficiency (%)': eff_op * 100 if 'eff_op' in locals() and not np.isnan(eff_op) else 'N/A',
-                            'NPSHa (m)': NPSHa if 'NPSHa' in locals() else 'N/A',
-                            'Vendor NPSHr (m)': NPSHr_vendor if 'NPSHr_vendor' in locals() and NPSHr_vendor > 0 else 'N/A',
-                            'NPSH Margin (m)': NPSH_margin if 'NPSH_margin' in locals() else 'N/A',
-                            'Velocity (m/s)': V if 'V' in locals() else 'N/A',
-                            'Reynolds #': Re if 'Re' in locals() else 'N/A',
-                            'Pipe ID (mm)': D_inner if 'D_inner' in locals() else 'N/A',
-                            'Pipe length (m)': L_pipe if 'L_pipe' in locals() else 'N/A',
-                            'Roughness (mm)': eps_mm if 'eps_mm' in locals() else 'N/A',
-                            'Fittings K (total)': K_fittings if 'K_fittings' in locals() else 'N/A',
-                            'Fluid': material_type if 'material_type' in locals() else 'N/A',
-                            'Temperature (°C)': T if 'T' in locals() else 'N/A',
-                            'Density (kg/m3)': density if 'density' in locals() else 'N/A',
-                            'Viscosity (cP)': mu_cP if 'mu_cP' in locals() else 'N/A',
-                            'Particle size (mm)': particle_size if 'particle_size' in locals() and particle_size else 'N/A',
-                            'Pump arrangement': pump_config if 'pump_config' in locals() else 'N/A',
-                            'Number of pumps': n_pumps if 'n_pumps' in locals() else 'N/A',
-                            'Pump speed (RPM)': pump_speed_rpm if 'pump_speed_rpm' in locals() else 'N/A',
-                        }
+                    # Build Process Parameters payload
+                    proc_params_export = {
+                        'Design Flow (m3/h)': Q_design * 3600 if 'Q_design' in locals() else 'N/A',
+                        'Operating Flow (m3/h)': Q_op * 3600 if 'Q_op' in locals() else 'N/A',
+                        'BEP Flow (m3/h)': Q_bep * 3600 if 'Q_bep' in locals() and not np.isnan(Q_bep) else 'N/A',
+                        'Design Head (m)': total_head_design if 'total_head_design' in locals() else 'N/A',
+                        'Static Head (m)': static_head if 'static_head' in locals() else 'N/A',
+                        'Shaft Power (kW)': shaft_kW if 'shaft_kW' in locals() else 'N/A',
+                        'Electrical Power (kW)': electrical_kW if 'electrical_kW' in locals() else 'N/A',
+                        'Motor Rating (kW)': motor_rated_kW if 'motor_rated_kW' in locals() else 'N/A',
+                        'Operating Efficiency (%)': eff_op * 100 if 'eff_op' in locals() and not np.isnan(eff_op) else 'N/A',
+                        'NPSHa (m)': NPSHa if 'NPSHa' in locals() else 'N/A',
+                        'Vendor NPSHr (m)': NPSHr_vendor if 'NPSHr_vendor' in locals() and NPSHr_vendor > 0 else 'N/A',
+                        'NPSH Margin (m)': NPSH_margin if 'NPSH_margin' in locals() else 'N/A',
+                        'Velocity (m/s)': V if 'V' in locals() else 'N/A',
+                        'Reynolds #': Re if 'Re' in locals() else 'N/A',
+                        'Pipe ID (mm)': D_inner if 'D_inner' in locals() else 'N/A',
+                        'Pipe length (m)': L_pipe if 'L_pipe' in locals() else 'N/A',
+                        'Roughness (mm)': eps_mm if 'eps_mm' in locals() else 'N/A',
+                        'Fittings K (total)': K_fittings if 'K_fittings' in locals() else 'N/A',
+                        'Fluid': material_type if 'material_type' in locals() else 'N/A',
+                        'Temperature (°C)': T if 'T' in locals() else 'N/A',
+                        'Density (kg/m3)': density if 'density' in locals() else 'N/A',
+                        'Viscosity (cP)': mu_cP if 'mu_cP' in locals() else 'N/A',
+                        'Particle size (mm)': particle_size if 'particle_size' in locals() and particle_size else 'N/A',
+                        'Pump arrangement': pump_config if 'pump_config' in locals() else 'N/A',
+                        'Number of pumps': n_pumps if 'n_pumps' in locals() else 'N/A',
+                        'Pump speed (RPM)': pump_speed_rpm if 'pump_speed_rpm' in locals() else 'N/A',
+                    }
 
-                        results_data = {
-                            'Design Flow (m3/h)': Q_design * 3600 if 'Q_design' in locals() else 'N/A',
-                            'Design Head (m)': total_head_design if 'total_head_design' in locals() else 'N/A',
-                            'Velocity (m/s)': V if 'V' in locals() else 'N/A',
-                            'Shaft Power (kW)': shaft_kW if 'shaft_kW' in locals() else 'N/A',
-                            'Motor Rating (kW)': motor_rated_kW if 'motor_rated_kW' in locals() else 'N/A',
-                            'Efficiency (%)': eff_op * 100 if 'eff_op' in locals() and not np.isnan(eff_op) else 'N/A',
-                            'NPSHa (m)': NPSHa if 'NPSHa' in locals() else 'N/A',
-                            'NPSH Margin (m)': NPSH_margin if 'NPSH_margin' in locals() else 'N/A',
-                            'Reynolds Number': Re if 'Re' in locals() else 'N/A',
-                            'Specific Speed (Ns)': Ns if 'Ns' in locals() else 'N/A',
-                            'Suction Specific Speed (Nss)': Nss if 'Nss' in locals() else 'N/A',
-                            'Cavitation Index (σ)': sigma if 'sigma' in locals() else 'N/A',
-                            'BEP Flow (m3/h)': Q_bep * 3600 if 'Q_bep' in locals() and not np.isnan(Q_bep) else 'N/A',
-                            'Operating Flow (m3/h)': Q_op * 3600 if 'Q_op' in locals() else 'N/A',
-                            'Deviation from BEP (%)': pct_from_bep if 'pct_from_bep' in locals() else 'N/A',
-                            'Relative Wear Rate': wear_rate if 'wear_rate' in locals() else 'N/A',
-                            'Est. Service Life (hrs)': estimated_service_life if 'estimated_service_life' in locals() else 'N/A',
-                            'Vibration Risk': vibration_severity if 'vibration_severity' in locals() else 'N/A',
-                            'Pulsation Risk': pulsation_risk if 'pulsation_risk' in locals() else 'N/A',
-                            'Seal Life Est. (hrs)': seal_life_hours if 'seal_life_hours' in locals() else 'N/A',
-                            'Annual Energy (kWh)': annual_energy_kWh if 'annual_energy_kWh' in locals() else 'N/A',
-                            'Annual Cost (₹)': annual_cost if 'annual_cost' in locals() else 'N/A', # Changed currency
-                            '10-Year Energy Cost (₹)': ten_year_cost if 'ten_year_cost' in locals() else 'N/A', # Changed currency
-                            'Q_points': Q_points if 'Q_points' in locals() else [],
-                            'H_pump': H_pump if 'H_pump' in locals() else [],
-                            'eff_curve': eff_curve if 'eff_curve' in locals() else [],
-                            'power_curve': power_curve if 'power_curve' in locals() else [],
-                            'Process Parameters': proc_params_export
-                        }
+                    results_data = {
+                        'Design Flow (m3/h)': Q_design * 3600 if 'Q_design' in locals() else 'N/A',
+                        'Design Head (m)': total_head_design if 'total_head_design' in locals() else 'N/A',
+                        'Velocity (m/s)': V if 'V' in locals() else 'N/A',
+                        'Shaft Power (kW)': shaft_kW if 'shaft_kW' in locals() else 'N/A',
+                        'Motor Rating (kW)': motor_rated_kW if 'motor_rated_kW' in locals() else 'N/A',
+                        'Efficiency (%)': eff_op * 100 if 'eff_op' in locals() and not np.isnan(eff_op) else 'N/A',
+                        'NPSHa (m)': NPSHa if 'NPSHa' in locals() else 'N/A',
+                        'NPSH Margin (m)': NPSH_margin if 'NPSH_margin' in locals() else 'N/A',
+                        'Reynolds Number': Re if 'Re' in locals() else 'N/A',
+                        'Specific Speed (Ns)': Ns if 'Ns' in locals() else 'N/A',
+                        'Suction Specific Speed (Nss)': Nss if 'Nss' in locals() else 'N/A',
+                        'Cavitation Index (σ)': sigma if 'sigma' in locals() else 'N/A',
+                        'BEP Flow (m3/h)': Q_bep * 3600 if 'Q_bep' in locals() and not np.isnan(Q_bep) else 'N/A',
+                        'Operating Flow (m3/h)': Q_op * 3600 if 'Q_op' in locals() else 'N/A',
+                        'Deviation from BEP (%)': pct_from_bep if 'pct_from_bep' in locals() else 'N/A',
+                        'Relative Wear Rate': wear_rate if 'wear_rate' in locals() else 'N/A',
+                        'Est. Service Life (hrs)': estimated_service_life if 'estimated_service_life' in locals() else 'N/A',
+                        'Vibration Risk': vibration_severity if 'vibration_severity' in locals() else 'N/A',
+                        'Pulsation Risk': pulsation_risk if 'pulsation_risk' in locals() else 'N/A',
+                        'Seal Life Est. (hrs)': seal_life_hours if 'seal_life_hours' in locals() else 'N/A',
+                        'Annual Energy (kWh)': annual_energy_kWh if 'annual_energy_kWh' in locals() else 'N/A',
+                        'Annual Cost (₹)': annual_cost if 'annual_cost' in locals() else 'N/A', # Changed currency
+                        '10-Year Energy Cost (₹)': ten_year_cost if 'ten_year_cost' in locals() else 'N/A', # Changed currency
+                        'Q_points': Q_points if 'Q_points' in locals() else [],
+                        'H_pump': H_pump if 'H_pump' in locals() else [],
+                        'eff_curve': eff_curve if 'eff_curve' in locals() else [],
+                        'power_curve': power_curve if 'power_curve' in locals() else [],
+                        'Process Parameters': proc_params_export
+                    }
 
+                    if OPENPYXL_AVAILABLE:
                         excel_bytes = create_excel_report_rotating(results_data)
-                        st.success("Excel report generated — click the button below to download.")
                         st.download_button(
                             label="Download Excel Report",
                             data=excel_bytes,
                             file_name=f"pump_sizing_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         )
-                    except Exception as e_export:
-                        st.error(f"Export failed: {e_export}")
+                    else:
+                        st.error("Excel export requires openpyxl. Install with: pip install openpyxl")
 
 
         except Exception as e:
