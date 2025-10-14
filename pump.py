@@ -10,10 +10,20 @@ from datetime import datetime
 # For PDF export we'll use reportlab (pure-python PDF generation)
 # pip install openpyxl reportlab fpdf
 try:
+    import openpyxl
+    from openpyxl import Workbook
+    OPENPYXL_AVAILABLE = True
+except Exception:
+    openpyxl = None
+    Workbook = None
+    OPENPYXL_AVAILABLE = False
+
+try:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    REPORTLAB_AVAILABLE = True
 except Exception:
     # Defer import errors until PDF feature is actually used
     A4 = None
@@ -24,6 +34,7 @@ except Exception:
     Spacer = None
     Table = None
     TableStyle = None
+    REPORTLAB_AVAILABLE = False
 
 # Set page config at the very top
 st.set_page_config(page_title="Advanced Pump & Vacuum Sizing", layout="wide")
