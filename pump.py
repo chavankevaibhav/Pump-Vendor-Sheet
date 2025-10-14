@@ -7,8 +7,23 @@ import matplotlib.pyplot as plt
 import io
 from datetime import datetime
 # For Excel export (requires openpyxl or xlsxwriter)
-# For PDF export (requires reportlab)
-# pip install openpyxl reportlab
+# For PDF export we'll use reportlab (pure-python PDF generation)
+# pip install openpyxl reportlab fpdf
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+except Exception:
+    # Defer import errors until PDF feature is actually used
+    A4 = None
+    colors = None
+    getSampleStyleSheet = None
+    SimpleDocTemplate = None
+    Paragraph = None
+    Spacer = None
+    Table = None
+    TableStyle = None
 
 # Set page config at the very top
 st.set_page_config(page_title="Advanced Pump & Vacuum Sizing", layout="wide")
@@ -294,6 +309,100 @@ def create_excel_report_rotating(results_data):
     buffer.close()
     return data
 # --- END EXCEL FUNCTION ---
+
+# --- PDF generation helper ---
+def create_pdf_report_rotating(results_data):
+    """Create a simple PDF report from results_data and return bytes.
+
+    Uses reportlab if available. If reportlab is not installed the function
+    raises an ImportError so the caller can inform the user.
+    """
+    if SimpleDocTemplate is None:
+        raise ImportError("reportlab is required for PDF generation. Install with: pip install reportlab")
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4)
+    styles = getSampleStyleSheet()
+    story = []
+
+    # Title
+    story.append(Paragraph("Pump Sizing Report", styles['Title']))
+    story.append(Spacer(1, 12))
+    story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
+    story.append(Spacer(1, 12))
+
+    # Summary table: pick top-level scalar items
+    rows = [("Parameter", "Value")]
+    for k, v in results_data.items():
+        if k in ['Q_points', 'H_pump', 'eff_curve', 'power_curve', 'Process Parameters']:
+            continue
+        val = v
+        try:
+            if hasattr(v, 'tolist') and not isinstance(v, (str, bytes)):
+                val = str(v.tolist())
+            else:
+                val = str(v)
+        except Exception:
+            val = str(v)
+        rows.append((k, val))
+
+    table = Table(rows, colWidths=[200, 300])
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+    ]))
+    story.append(table)
+    story.append(Spacer(1, 12))
+
+    # Optional: include a short process parameters table if present
+    pp = results_data.get('Process Parameters')
+    if pp:
+        story.append(Paragraph('Process Parameters', styles['h2']))
+        pp_rows = [("Parameter", "Value")]
+        if isinstance(pp, dict):
+            for k, v in pp.items():
+                pp_rows.append((k, str(v)))
+        elif isinstance(pp, (list, tuple)):
+            for item in pp:
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    pp_rows.append((str(item[0]), str(item[1])))
+        pp_table = Table(pp_rows, colWidths=[200, 300])
+        pp_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+        ]))
+        story.append(pp_table)
+
+    doc.build(story)
+    buffer.seek(0)
+    data = buffer.getvalue()
+    buffer.close()
+    return data
+
+# --- Excel read helper (for future import/upload) ---
+def read_excel_helper(uploaded_file) -> pd.DataFrame:
+    """Read an uploaded Excel or CSV into a pandas DataFrame.
+
+    Accepts streamlit UploadedFile or path-like object.
+    """
+    if uploaded_file is None:
+        return pd.DataFrame()
+    name = getattr(uploaded_file, 'name', '')
+    try:
+        if name.lower().endswith('.csv'):
+            return pd.read_csv(uploaded_file)
+        else:
+            return pd.read_excel(uploaded_file)
+    except Exception:
+        # Fallback: try reading as CSV with io
+        try:
+            content = uploaded_file.read()
+            return pd.read_csv(io.BytesIO(content))
+        except Exception:
+            return pd.DataFrame()
+
+# --- END helpers ---
 
 # ------------------ Rotating Pumps Page ------------------
 if page == "Rotating Pumps (Centrifugal etc.)":
@@ -945,7 +1054,50 @@ if page == "Rotating Pumps (Centrifugal etc.)":
             col_exp1, col_exp2 = st.columns(2)
             with col_exp1:
                 if st.button("📄 Generate PDF Report", type="secondary"):
-                    st.info("PDF generation feature requires integration with reportlab or similar library.")
+                    try:
+                        # Build the same results_data used for Excel export (best-effort)
+                        results_data_pdf = {
+                            'Design Flow (m3/h)': Q_design * 3600 if 'Q_design' in locals() else 'N/A',
+                            'Design Head (m)': total_head_design if 'total_head_design' in locals() else 'N/A',
+                            'Velocity (m/s)': V if 'V' in locals() else 'N/A',
+                            'Shaft Power (kW)': shaft_kW if 'shaft_kW' in locals() else 'N/A',
+                            'Motor Rating (kW)': motor_rated_kW if 'motor_rated_kW' in locals() else 'N/A',
+                            'Efficiency (%)': eff_op * 100 if 'eff_op' in locals() and not np.isnan(eff_op) else 'N/A',
+                            'NPSHa (m)': NPSHa if 'NPSHa' in locals() else 'N/A',
+                            'NPSH Margin (m)': NPSH_margin if 'NPSH_margin' in locals() else 'N/A',
+                            'Reynolds Number': Re if 'Re' in locals() else 'N/A',
+                            'Specific Speed (Ns)': Ns if 'Ns' in locals() else 'N/A',
+                            'Suction Specific Speed (Nss)': Nss if 'Nss' in locals() else 'N/A',
+                            'Cavitation Index (σ)': sigma if 'sigma' in locals() else 'N/A',
+                            'BEP Flow (m3/h)': Q_bep * 3600 if 'Q_bep' in locals() and not np.isnan(Q_bep) else 'N/A',
+                            'Operating Flow (m3/h)': Q_op * 3600 if 'Q_op' in locals() else 'N/A',
+                            'Deviation from BEP (%)': pct_from_bep if 'pct_from_bep' in locals() else 'N/A',
+                            'Relative Wear Rate': wear_rate if 'wear_rate' in locals() else 'N/A',
+                            'Est. Service Life (hrs)': estimated_service_life if 'estimated_service_life' in locals() else 'N/A',
+                            'Vibration Risk': vibration_severity if 'vibration_severity' in locals() else 'N/A',
+                            'Pulsation Risk': pulsation_risk if 'pulsation_risk' in locals() else 'N/A',
+                            'Seal Life Est. (hrs)': seal_life_hours if 'seal_life_hours' in locals() else 'N/A',
+                            'Annual Energy (kWh)': annual_energy_kWh if 'annual_energy_kWh' in locals() else 'N/A',
+                            'Annual Cost (₹)': annual_cost if 'annual_cost' in locals() else 'N/A',
+                            '10-Year Energy Cost (₹)': ten_year_cost if 'ten_year_cost' in locals() else 'N/A',
+                            'Q_points': Q_points if 'Q_points' in locals() else [],
+                            'H_pump': H_pump if 'H_pump' in locals() else [],
+                            'eff_curve': eff_curve if 'eff_curve' in locals() else [],
+                            'power_curve': power_curve if 'power_curve' in locals() else [],
+                            'Process Parameters': proc_params_export if 'proc_params_export' in locals() else {}
+                        }
+                        pdf_bytes = create_pdf_report_rotating(results_data_pdf)
+                        st.success("PDF generated — click below to download.")
+                        st.download_button(
+                            label="Download PDF Report",
+                            data=pdf_bytes,
+                            file_name=f"pump_sizing_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                            mime="application/pdf"
+                        )
+                    except ImportError as imp_err:
+                        st.error(str(imp_err))
+                    except Exception as pdf_err:
+                        st.error(f"PDF generation failed: {pdf_err}")
 
             with col_exp2:
                 if st.button("📊 Export to Excel", type="primary"):
