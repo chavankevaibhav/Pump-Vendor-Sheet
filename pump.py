@@ -6,19 +6,9 @@ import math
 import matplotlib.pyplot as plt
 import io
 from datetime import datetime
-import openpyxl
-from openpyxl import Workbook
-# For Excel export (requires openpyxl or xlsxwriter)
-# For PDF export we'll use reportlab (pure-python PDF generation)
-# pip install openpyxl reportlab fpdf
-try:
-    import openpyxl
-    from openpyxl import Workbook
-    OPENPYXL_AVAILABLE = True
-except Exception:
-    openpyxl = None
-    Workbook = None
-    OPENPYXL_AVAILABLE = False
+# Note: Excel export (openpyxl) removed per request. PDF export remains available via reportlab.
+# For PDF export we use reportlab (pure-python PDF generation)
+# pip install reportlab fpdf
 
 try:
     from reportlab.lib.pagesizes import A4
@@ -244,203 +234,206 @@ def estimate_seal_life(material_type, T, V):
 # --- END NEW FUNCTIONS ---
 
 # --- NEW: Excel Export Function ---
-def create_excel_report_rotating(results_data):
-    """Create an Excel report for Rotating Pump calculations.
-
-    Writes a Summary sheet (top-level scalars), a Curves sheet (downsampled
-    if very large), and a Process Parameters sheet when provided.
-    Returns raw bytes for Streamlit's download_button.
-    """
-    import pandas as pd
-    from io import BytesIO
-
-    buffer = BytesIO()
-
-    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        # Build summary from results_data excluding large arrays and process params
-        summary_items = []
-        for k, v in results_data.items():
-            if k in ['Q_points', 'H_pump', 'eff_curve', 'power_curve', 'Process Parameters']:
-                continue
-            # Convert numpy arrays/objects to Python types where possible
-            try:
-                if hasattr(v, 'tolist') and not isinstance(v, (str, bytes)):
-                    val = v.tolist()
-                else:
-                    val = v
-                summary_items.append((k, val))
-            except Exception:
-                summary_items.append((k, str(v)))
-
-        summary_df = pd.DataFrame(summary_items, columns=['Parameter', 'Value'])
-        summary_df.to_excel(writer, sheet_name='Summary', index=False)
-
-        # Curves: write to separate sheet; downsample if necessary
-        if 'Q_points' in results_data and 'H_pump' in results_data:
-            Q_pts = list(results_data.get('Q_points', []))
-            H_pts = list(results_data.get('H_pump', []))
-            eff_pts = list(results_data.get('eff_curve', []))
-            pwr_pts = list(results_data.get('power_curve', []))
-
-            max_rows = 1000
-            length = max(len(Q_pts), len(H_pts), len(eff_pts), len(pwr_pts))
-            if length > max_rows and length > 0:
-                step = max(1, int(length / max_rows))
-                Q_pts = Q_pts[::step]
-                H_pts = H_pts[::step]
-                eff_pts = eff_pts[::step]
-                pwr_pts = pwr_pts[::step]
-
-            curve_df = pd.DataFrame({
-                'Flow (m3/h)': [q * 3600 for q in Q_pts],
-                'Head (m)': H_pts,
-                'Efficiency (%)': [e * 100 for e in eff_pts],
-                'Power (kW)': pwr_pts
-            })
-            curve_df.to_excel(writer, sheet_name='Curves', index=False)
-
-        # Process Parameters sheet
-        if 'Process Parameters' in results_data:
-            try:
-                pp = results_data['Process Parameters']
-                pp_items = []
-                if isinstance(pp, dict):
-                    for k, v in pp.items():
-                        pp_items.append((k, v))
-                elif isinstance(pp, (list, tuple)):
-                    for item in pp:
-                        if isinstance(item, (list, tuple)) and len(item) >= 2:
-                            pp_items.append((item[0], item[1]))
-                pp_df = pd.DataFrame(pp_items, columns=['Parameter', 'Value'])
-                pp_df.to_excel(writer, sheet_name='Process Parameters', index=False)
-            except Exception:
-                note_df = pd.DataFrame([('Process Parameters', 'Unable to export')], columns=['Parameter', 'Value'])
-                note_df.to_excel(writer, sheet_name='Process Parameters', index=False)
-
-    buffer.seek(0)
-    data = buffer.getvalue()
-    buffer.close()
-    return data
-# --- END EXCEL FUNCTION ---
+# Note: Excel export implementation removed per user request.
 
 # --- PDF generation helper ---
 def create_pdf_report_rotating(results_data):
     """Create a simple PDF report from results_data and return bytes.
 
     Uses reportlab if available. If reportlab is not installed the function
-    raises an ImportError so the caller can inform the user.
+    will fall back to a minimal pure-Python PDF generator so a downloadable
+    PDF is still returned even without reportlab.
     """
-    if not REPORTLAB_AVAILABLE:
-        raise ImportError("reportlab is required for PDF generation. Install with: pip install reportlab")
+    if REPORTLAB_AVAILABLE:
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=A4)
+        styles = getSampleStyleSheet()
+        story = []
 
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4)
-    styles = getSampleStyleSheet()
-    story = []
+        # Title
+        story.append(Paragraph("Pump Sizing Report", styles['Title']))
+        story.append(Spacer(1, 12))
+        story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
+        story.append(Spacer(1, 12))
 
-    # Title
-    story.append(Paragraph("Pump Sizing Report", styles['Title']))
-    story.append(Spacer(1, 12))
-    story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
-    story.append(Spacer(1, 12))
-
-    # Summary table: pick top-level scalar items
-    rows = [("Parameter", "Value")]
-    for k, v in results_data.items():
-        if k in ['Q_points', 'H_pump', 'eff_curve', 'power_curve', 'Process Parameters']:
-            continue
-        val = v
-        try:
-            if hasattr(v, 'tolist') and not isinstance(v, (str, bytes)):
-                val = str(v.tolist())
-            else:
+        # Summary table: pick top-level scalar items
+        rows = [("Parameter", "Value")]
+        for k, v in results_data.items():
+            if k in ['Q_points', 'H_pump', 'eff_curve', 'power_curve', 'Process Parameters']:
+                continue
+            val = v
+            try:
+                if hasattr(v, 'tolist') and not isinstance(v, (str, bytes)):
+                    val = str(v.tolist())
+                else:
+                    val = str(v)
+            except Exception:
                 val = str(v)
-        except Exception:
-            val = str(v)
-        rows.append((k, val))
+            rows.append((k, val))
 
-    table = Table(rows, colWidths=[200, 300])
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.black),
-        ('VALIGN', (0,0), (-1,-1), 'TOP'),
-    ]))
-    story.append(table)
-    story.append(Spacer(1, 12))
-
-    # Optional: include a short process parameters table if present
-    pp = results_data.get('Process Parameters')
-    if pp:
-        story.append(Paragraph('Process Parameters', styles['h2']))
-        pp_rows = [("Parameter", "Value")]
-        if isinstance(pp, dict):
-            for k, v in pp.items():
-                pp_rows.append((k, str(v)))
-        elif isinstance(pp, (list, tuple)):
-            for item in pp:
-                if isinstance(item, (list, tuple)) and len(item) >= 2:
-                    pp_rows.append((str(item[0]), str(item[1])))
-        pp_table = Table(pp_rows, colWidths=[200, 300])
-        pp_table.setStyle(TableStyle([
+        table = Table(rows, colWidths=[200, 300])
+        table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
             ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+            ('VALIGN', (0,0), (-1,-1), 'TOP'),
         ]))
-        story.append(pp_table)
+        story.append(table)
+        story.append(Spacer(1, 12))
 
-    # Embed charts (render matplotlib figures to PNG and insert)
-    try:
-        Q_pts = np.array(results_data.get('Q_points', []))
-        H_pts = np.array(results_data.get('H_pump', []))
-        eff_pts = np.array(results_data.get('eff_curve', []))
-        pwr_pts = np.array(results_data.get('power_curve', []))
+        # Optional: include a short process parameters table if present
+        pp = results_data.get('Process Parameters')
+        if pp:
+            story.append(Paragraph('Process Parameters', styles['h2']))
+            pp_rows = [("Parameter", "Value")]
+            if isinstance(pp, dict):
+                for k, v in pp.items():
+                    pp_rows.append((k, str(v)))
+            elif isinstance(pp, (list, tuple)):
+                for item in pp:
+                    if isinstance(item, (list, tuple)) and len(item) >= 2:
+                        pp_rows.append((str(item[0]), str(item[1])))
+            pp_table = Table(pp_rows, colWidths=[200, 300])
+            pp_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+                ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+            ]))
+            story.append(pp_table)
 
-        # Only render if we have Q and H data
-        if Q_pts.size and H_pts.size:
-            fig, ax = plt.subplots(figsize=(6, 3.5))
-            ax.plot(Q_pts * 3600, H_pts, 'r-', linewidth=2, label='Pump Curve')
-            ax.set_xlabel('Flow (m³/h)')
-            ax.set_ylabel('Head (m)')
-            ax.set_title('Pump Curve')
-            ax.grid(True, alpha=0.3)
-            buf = io.BytesIO()
-            plt.tight_layout()
-            fig.savefig(buf, format='png', dpi=150)
-            plt.close(fig)
-            buf.seek(0)
-            img = RLImage(buf, width=A4[0]-100, height=(A4[1]/4))
-            story.append(Spacer(1, 12))
-            story.append(img)
+        # Embed charts (render matplotlib figures to PNG and insert)
+        try:
+            Q_pts = np.array(results_data.get('Q_points', []))
+            H_pts = np.array(results_data.get('H_pump', []))
+            eff_pts = np.array(results_data.get('eff_curve', []))
+            pwr_pts = np.array(results_data.get('power_curve', []))
 
-        # Efficiency or Power figure
-        if Q_pts.size and (eff_pts.size or pwr_pts.size):
-            fig2, ax2 = plt.subplots(figsize=(6, 3.5))
-            if eff_pts.size:
-                ax2.plot(Q_pts * 3600, eff_pts * 100, 'g-', linewidth=2, label='Efficiency (%)')
-                ax2.set_ylabel('Efficiency (%)')
-            if pwr_pts.size:
-                ax3 = ax2.twinx()
-                ax3.plot(Q_pts * 3600, pwr_pts, 'purple', linewidth=2, label='Power (kW)')
-                ax3.set_ylabel('Power (kW)')
-            ax2.set_xlabel('Flow (m³/h)')
-            ax2.set_title('Efficiency & Power')
-            ax2.grid(True, alpha=0.3)
-            buf2 = io.BytesIO()
-            plt.tight_layout()
-            fig2.savefig(buf2, format='png', dpi=150)
-            plt.close(fig2)
-            buf2.seek(0)
-            img2 = RLImage(buf2, width=A4[0]-100, height=(A4[1]/4))
-            story.append(Spacer(1, 12))
-            story.append(img2)
-    except Exception:
-        # If plotting or embedding fails, continue without images
-        pass
+            # Only render if we have Q and H data
+            if Q_pts.size and H_pts.size:
+                fig, ax = plt.subplots(figsize=(6, 3.5))
+                ax.plot(Q_pts * 3600, H_pts, 'r-', linewidth=2, label='Pump Curve')
+                ax.set_xlabel('Flow (m³/h)')
+                ax.set_ylabel('Head (m)')
+                ax.set_title('Pump Curve')
+                ax.grid(True, alpha=0.3)
+                buf = io.BytesIO()
+                plt.tight_layout()
+                fig.savefig(buf, format='png', dpi=150)
+                plt.close(fig)
+                buf.seek(0)
+                img = RLImage(buf, width=A4[0]-100, height=(A4[1]/4))
+                story.append(Spacer(1, 12))
+                story.append(img)
 
-    doc.build(story)
-    buffer.seek(0)
-    data = buffer.getvalue()
-    buffer.close()
-    return data
+            # Efficiency or Power figure
+            if Q_pts.size and (eff_pts.size or pwr_pts.size):
+                fig2, ax2 = plt.subplots(figsize=(6, 3.5))
+                if eff_pts.size:
+                    ax2.plot(Q_pts * 3600, eff_pts * 100, 'g-', linewidth=2, label='Efficiency (%)')
+                    ax2.set_ylabel('Efficiency (%)')
+                if pwr_pts.size:
+                    ax3 = ax2.twinx()
+                    ax3.plot(Q_pts * 3600, pwr_pts, 'purple', linewidth=2, label='Power (kW)')
+                    ax3.set_ylabel('Power (kW)')
+                ax2.set_xlabel('Flow (m³/h)')
+                ax2.set_title('Efficiency & Power')
+                ax2.grid(True, alpha=0.3)
+                buf2 = io.BytesIO()
+                plt.tight_layout()
+                fig2.savefig(buf2, format='png', dpi=150)
+                plt.close(fig2)
+                buf2.seek(0)
+                img2 = RLImage(buf2, width=A4[0]-100, height=(A4[1]/4))
+                story.append(Spacer(1, 12))
+                story.append(img2)
+        except Exception:
+            # If plotting or embedding fails, continue without images
+            pass
+
+        doc.build(story)
+        buffer.seek(0)
+        data = buffer.getvalue()
+        buffer.close()
+        return data
+    else:
+        # Minimal pure-Python PDF fallback: build a single-page PDF with text
+        def fallback_simple_pdf(text_lines):
+            # Build PDF objects
+            lines = []
+            obj_offsets = []
+            offset = 0
+
+            def write(s):
+                nonlocal offset
+                b = s.encode('latin-1')
+                lines.append(b)
+                offset += len(b)
+
+            write('%PDF-1.1\n')
+
+            # Object 1: Catalog
+            obj_offsets.append(offset)
+            write('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n')
+
+            # Object 2: Pages
+            obj_offsets.append(offset)
+            write('2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n')
+
+            # Object 3: Page
+            obj_offsets.append(offset)
+            write('3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 4 0 R >>\nendobj\n')
+
+            # Object 4: Font
+            obj_offsets.append(offset)
+            write('4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n')
+
+            # Object 5: Content stream
+            text = '\\n'.join(text_lines)
+            content = 'BT /F1 12 Tf 72 720 Td (' + text.replace('(', '\(').replace(')', '\)') + ') Tj ET\n'
+            content_bytes = content.encode('latin-1')
+            obj_offsets.append(offset)
+            write('5 0 obj\n<< /Length %d >>\nstream\n' % len(content_bytes))
+            write(content)
+            write('\nendstream\nendobj\n')
+
+            # xref
+            xref_offset = offset
+            write('xref\n0 %d\n' % (len(obj_offsets) + 1))
+            write('0000000000 65535 f \n')
+            cur = 0
+            for off in obj_offsets:
+                write('%010d 00000 n \n' % off)
+
+            # trailer
+            write('trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n' % (len(obj_offsets) + 1, xref_offset))
+
+            return b''.join(lines)
+
+        # Build textual summary
+        summary_lines = [f'Pump Sizing Report - Generated: {datetime.now().isoformat()}']
+        for k, v in results_data.items():
+            if k in ['Q_points', 'H_pump', 'eff_curve', 'power_curve', 'Process Parameters']:
+                continue
+            try:
+                if hasattr(v, 'tolist') and not isinstance(v, (str, bytes)):
+                    val = str(v.tolist())
+                else:
+                    val = str(v)
+            except Exception:
+                val = str(v)
+            summary_lines.append(f'{k}: {val}')
+
+        # Include a short process parameter list if available
+        pp = results_data.get('Process Parameters')
+        if pp:
+            summary_lines.append('--- Process Parameters ---')
+            if isinstance(pp, dict):
+                for k, v in pp.items():
+                    summary_lines.append(f'{k}: {v}')
+            elif isinstance(pp, (list, tuple)):
+                for item in pp:
+                    if isinstance(item, (list, tuple)) and len(item) >= 2:
+                        summary_lines.append(f'{item[0]}: {item[1]}')
+
+        return fallback_simple_pdf(summary_lines)
 
 # --- Excel read helper (for future import/upload) ---
 def read_excel_helper(uploaded_file) -> pd.DataFrame:
@@ -1221,16 +1214,8 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                         'Process Parameters': proc_params_export
                     }
 
-                    if OPENPYXL_AVAILABLE:
-                        excel_bytes = create_excel_report_rotating(results_data)
-                        st.download_button(
-                            label="Download Excel Report",
-                            data=excel_bytes,
-                            file_name=f"pump_sizing_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        )
-                    else:
-                        st.error("Excel export requires openpyxl. Install with: pip install openpyxl")
+                    # Excel export removed — suggest PDF instead
+                    st.info("Excel export was removed. Use the PDF export to get a vendor-ready report.")
 
 
         except Exception as e:
