@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -6,10 +5,6 @@ import math
 import matplotlib.pyplot as plt
 import io
 from datetime import datetime
-from reportlab.lib.pagesizes import A4
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
 
 # Set page config at the very top
 st.set_page_config(page_title="Advanced Pump & Vacuum Sizing", layout="wide")
@@ -217,116 +212,116 @@ def estimate_seal_life(material_type, T, V):
 # --- END NEW FUNCTIONS ---
 
 # --- PDF Report Generation ---
-def create_pdf_report_rotating(results_data):
-    """Create a simple PDF report from results_data and return bytes."""
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4)
-    styles = getSampleStyleSheet()
-    story = []
+# def create_pdf_report_rotating(results_data):
+#     """Create a simple PDF report from results_data and return bytes."""
+#     buffer = io.BytesIO()
+#     doc = SimpleDocTemplate(buffer, pagesize=A4)
+#     styles = getSampleStyleSheet()
+#     story = []
 
-    # Title
-    story.append(Paragraph("Pump Sizing Report", styles['Title']))
-    story.append(Spacer(1, 12))
-    story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
-    story.append(Spacer(1, 12))
+#     # Title
+#     story.append(Paragraph("Pump Sizing Report", styles['Title']))
+#     story.append(Spacer(1, 12))
+#     story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
+#     story.append(Spacer(1, 12))
 
-    # Summary table: pick top-level scalar items
-    rows = [("Parameter", "Value")]
-    for k, v in results_data.items():
-        if k in ['Q_points', 'H_pump', 'eff_curve', 'power_curve', 'Process Parameters']:
-            continue
-        val = v
-        try:
-            if hasattr(v, 'tolist') and not isinstance(v, (str, bytes)):
-                val = str(v.tolist())
-            else:
-                val = str(v)
-        except Exception:
-            val = str(v)
-        rows.append((k, val))
+#     # Summary table: pick top-level scalar items
+#     rows = [("Parameter", "Value")]
+#     for k, v in results_data.items():
+#         if k in ['Q_points', 'H_pump', 'eff_curve', 'power_curve', 'Process Parameters']:
+#             continue
+#         val = v
+#         try:
+#             if hasattr(v, 'tolist') and not isinstance(v, (str, bytes)):
+#                 val = str(v.tolist())
+#             else:
+#                 val = str(v)
+#         except Exception:
+#             val = str(v)
+#         rows.append((k, val))
 
-        table = Table(rows, colWidths=[200, 300])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-            ('GRID', (0,0), (-1,-1), 0.5, colors.black),
-            ('VALIGN', (0,0), (-1,-1), 'TOP'),
-        ]))
-        story.append(table)
-        story.append(Spacer(1, 12))
+#         table = Table(rows, colWidths=[200, 300])
+#         table.setStyle(TableStyle([
+#             ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+#             ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+#             ('VALIGN', (0,0), (-1,-1), 'TOP'),
+#         ]))
+#         story.append(table)
+#         story.append(Spacer(1, 12))
 
-        # Optional: include a short process parameters table if present
-        pp = results_data.get('Process Parameters')
-        if pp:
-            story.append(Paragraph('Process Parameters', styles['h2']))
-            pp_rows = [("Parameter", "Value")]
-            if isinstance(pp, dict):
-                for k, v in pp.items():
-                    pp_rows.append((k, str(v)))
-            elif isinstance(pp, (list, tuple)):
-                for item in pp:
-                    if isinstance(item, (list, tuple)) and len(item) >= 2:
-                        pp_rows.append((str(item[0]), str(item[1])))
-            pp_table = Table(pp_rows, colWidths=[200, 300])
-            pp_table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-                ('GRID', (0,0), (-1,-1), 0.5, colors.black),
-            ]))
-            story.append(pp_table)
+#         # Optional: include a short process parameters table if present
+#         pp = results_data.get('Process Parameters')
+#         if pp:
+#             story.append(Paragraph('Process Parameters', styles['h2']))
+#             pp_rows = [("Parameter", "Value")]
+#             if isinstance(pp, dict):
+#                 for k, v in pp.items():
+#                     pp_rows.append((k, str(v)))
+#             elif isinstance(pp, (list, tuple)):
+#                 for item in pp:
+#                     if isinstance(item, (list, tuple)) and len(item) >= 2:
+#                         pp_rows.append((str(item[0]), str(item[1])))
+#             pp_table = Table(pp_rows, colWidths=[200, 300])
+#             pp_table.setStyle(TableStyle([
+#                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+#                 ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+#             ]))
+#             story.append(pp_table)
 
-        # Embed charts (render matplotlib figures to PNG and insert)
-        try:
-            Q_pts = np.array(results_data.get('Q_points', []))
-            H_pts = np.array(results_data.get('H_pump', []))
-            eff_pts = np.array(results_data.get('eff_curve', []))
-            pwr_pts = np.array(results_data.get('power_curve', []))
+#         # Embed charts (render matplotlib figures to PNG and insert)
+#         try:
+#             Q_pts = np.array(results_data.get('Q_points', []))
+#             H_pts = np.array(results_data.get('H_pump', []))
+#             eff_pts = np.array(results_data.get('eff_curve', []))
+#             pwr_pts = np.array(results_data.get('power_curve', []))
 
-            # Only render if we have Q and H data
-            if Q_pts.size and H_pts.size:
-                fig, ax = plt.subplots(figsize=(6, 3.5))
-                ax.plot(Q_pts * 3600, H_pts, 'r-', linewidth=2, label='Pump Curve')
-                ax.set_xlabel('Flow (m³/h)')
-                ax.set_ylabel('Head (m)')
-                ax.set_title('Pump Curve')
-                ax.grid(True, alpha=0.3)
-                buf = io.BytesIO()
-                plt.tight_layout()
-                fig.savefig(buf, format='png', dpi=150)
-                plt.close(fig)
-                buf.seek(0)
-                img = RLImage(buf, width=A4[0]-100, height=(A4[1]/4))
-                story.append(Spacer(1, 12))
-                story.append(img)
+#             # Only render if we have Q and H data
+#             if Q_pts.size and H_pts.size:
+#                 fig, ax = plt.subplots(figsize=(6, 3.5))
+#                 ax.plot(Q_pts * 3600, H_pts, 'r-', linewidth=2, label='Pump Curve')
+#                 ax.set_xlabel('Flow (m³/h)')
+#                 ax.set_ylabel('Head (m)')
+#                 ax.set_title('Pump Curve')
+#                 ax.grid(True, alpha=0.3)
+#                 buf = io.BytesIO()
+#                 plt.tight_layout()
+#                 fig.savefig(buf, format='png', dpi=150)
+#                 plt.close(fig)
+#                 buf.seek(0)
+#                 img = RLImage(buf, width=A4[0]-100, height=(A4[1]/4))
+#                 story.append(Spacer(1, 12))
+#                 story.append(img)
 
-            # Efficiency or Power figure
-            if Q_pts.size and (eff_pts.size or pwr_pts.size):
-                fig2, ax2 = plt.subplots(figsize=(6, 3.5))
-                if eff_pts.size:
-                    ax2.plot(Q_pts * 3600, eff_pts * 100, 'g-', linewidth=2, label='Efficiency (%)')
-                    ax2.set_ylabel('Efficiency (%)')
-                if pwr_pts.size:
-                    ax3 = ax2.twinx()
-                    ax3.plot(Q_pts * 3600, pwr_pts, 'purple', linewidth=2, label='Power (kW)')
-                    ax3.set_ylabel('Power (kW)')
-                ax2.set_xlabel('Flow (m³/h)')
-                ax2.set_title('Efficiency & Power')
-                ax2.grid(True, alpha=0.3)
-                buf2 = io.BytesIO()
-                plt.tight_layout()
-                fig2.savefig(buf2, format='png', dpi=150)
-                plt.close(fig2)
-                buf2.seek(0)
-                img2 = RLImage(buf2, width=A4[0]-100, height=(A4[1]/4))
-                story.append(Spacer(1, 12))
-                story.append(img2)
-        except Exception:
-            # If plotting or embedding fails, continue without images
-            pass
+#             # Efficiency or Power figure
+#             if Q_pts.size and (eff_pts.size or pwr_pts.size):
+#                 fig2, ax2 = plt.subplots(figsize=(6, 3.5))
+#                 if eff_pts.size:
+#                     ax2.plot(Q_pts * 3600, eff_pts * 100, 'g-', linewidth=2, label='Efficiency (%)')
+#                     ax2.set_ylabel('Efficiency (%)')
+#                 if pwr_pts.size:
+#                     ax3 = ax2.twinx()
+#                     ax3.plot(Q_pts * 3600, pwr_pts, 'purple', linewidth=2, label='Power (kW)')
+#                     ax3.set_ylabel('Power (kW)')
+#                 ax2.set_xlabel('Flow (m³/h)')
+#                 ax2.set_title('Efficiency & Power')
+#                 ax2.grid(True, alpha=0.3)
+#                 buf2 = io.BytesIO()
+#                 plt.tight_layout()
+#                 fig2.savefig(buf2, format='png', dpi=150)
+#                 plt.close(fig2)
+#                 buf2.seek(0)
+#                 img2 = RLImage(buf2, width=A4[0]-100, height=(A4[1]/4))
+#                 story.append(Spacer(1, 12))
+#                 story.append(img2)
+#         except Exception:
+#             # If plotting or embedding fails, continue without images
+#             pass
 
-        doc.build(story)
-        buffer.seek(0)
-        data = buffer.getvalue()
-        buffer.close()
-        return data
+#     doc.build(story)
+#     buffer.seek(0)
+#     data = buffer.getvalue()
+#     buffer.close()
+#     return data
 
 def fallback_simple_pdf(text_lines):
     # Build PDF objects
@@ -1082,50 +1077,51 @@ if page == "Rotating Pumps (Centrifugal etc.)":
             col_exp1, col_exp2 = st.columns(2)
             with col_exp1:
                 if st.button("📄 Generate PDF Report", type="secondary"):
+                    st.warning("PDF report generation is disabled in this demo version.")
                     # Build the same results_data used for Excel export
-                    results_data_pdf = {
-                        'Design Flow (m3/h)': Q_design * 3600 if 'Q_design' in locals() else 'N/A',
-                        'Design Head (m)': total_head_design if 'total_head_design' in locals() else 'N/A',
-                        'Velocity (m/s)': V if 'V' in locals() else 'N/A',
-                        'Shaft Power (kW)': shaft_kW if 'shaft_kW' in locals() else 'N/A',
-                        'Motor Rating (kW)': motor_rated_kW if 'motor_rated_kW' in locals() else 'N/A',
-                        'Efficiency (%)': eff_op * 100 if 'eff_op' in locals() and not np.isnan(eff_op) else 'N/A',
-                        'NPSHa (m)': NPSHa if 'NPSHa' in locals() else 'N/A',
-                        'NPSH Margin (m)': NPSH_margin if 'NPSH_margin' in locals() else 'N/A',
-                        'Reynolds Number': Re if 'Re' in locals() else 'N/A',
-                        'Specific Speed (Ns)': Ns if 'Ns' in locals() else 'N/A',
-                        'Suction Specific Speed (Nss)': Nss if 'Nss' in locals() else 'N/A',
-                        'Cavitation Index (σ)': sigma if 'sigma' in locals() else 'N/A',
-                        'BEP Flow (m3/h)': Q_bep * 3600 if 'Q_bep' in locals() and not np.isnan(Q_bep) else 'N/A',
-                        'Operating Flow (m3/h)': Q_op * 3600 if 'Q_op' in locals() else 'N/A',
-                        'Deviation from BEP (%)': pct_from_bep if 'pct_from_bep' in locals() else 'N/A',
-                        'Relative Wear Rate': wear_rate if 'wear_rate' in locals() else 'N/A',
-                        'Est. Service Life (hrs)': estimated_service_life if 'estimated_service_life' in locals() else 'N/A',
-                        'Vibration Risk': vibration_severity if 'vibration_severity' in locals() else 'N/A',
-                        'Pulsation Risk': pulsation_risk if 'pulsation_risk' in locals() else 'N/A',
-                        'Seal Life Est. (hrs)': seal_life_hours if 'seal_life_hours' in locals() else 'N/A',
-                        'Annual Energy (kWh)': annual_energy_kWh if 'annual_energy_kWh' in locals() else 'N/A',
-                        'Annual Cost (₹)': annual_cost if 'annual_cost' in locals() else 'N/A',
-                        '10-Year Energy Cost (₹)': ten_year_cost if 'ten_year_cost' in locals() else 'N/A',
-                        'Q_points': Q_points if 'Q_points' in locals() else [],
-                        'H_pump': H_pump if 'H_pump' in locals() else [],
-                        'eff_curve': eff_curve if 'eff_curve' in locals() else [],
-                        'power_curve': power_curve if 'power_curve' in locals() else [],
-                        'Process Parameters': {
-                            'Design Flow (m3/h)': Q_design * 3600 if 'Q_design' in locals() else 'N/A',
-                            'Operating Flow (m3/h)': Q_op * 3600 if 'Q_op' in locals() else 'N/A',
-                            'Design Head (m)': total_head_design if 'total_head_design' in locals() else 'N/A',
-                            'Static Head (m)': static_head if 'static_head' in locals() else 'N/A',
-                            'Efficiency (%)': eff_op * 100 if 'eff_op' in locals() else 'N/A'
-                        }
-                    }
-                    pdf_bytes = create_pdf_report_rotating(results_data_pdf)
-                    st.download_button(
-                        label="Download PDF Report",
-                        data=pdf_bytes,
-                        file_name=f"pump_sizing_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                        mime="application/pdf"
-                    )
+                    # results_data_pdf = {
+                    #     'Design Flow (m3/h)': Q_design * 3600 if 'Q_design' in locals() else 'N/A',
+                    #     'Design Head (m)': total_head_design if 'total_head_design' in locals() else 'N/A',
+                    #     'Velocity (m/s)': V if 'V' in locals() else 'N/A',
+                    #     'Shaft Power (kW)': shaft_kW if 'shaft_kW' in locals() else 'N/A',
+                    #     'Motor Rating (kW)': motor_rated_kW if 'motor_rated_kW' in locals() else 'N/A',
+                    #     'Efficiency (%)': eff_op * 100 if 'eff_op' in locals() and not np.isnan(eff_op) else 'N/A',
+                    #     'NPSHa (m)': NPSHa if 'NPSHa' in locals() else 'N/A',
+                    #     'NPSH Margin (m)': NPSH_margin if 'NPSH_margin' in locals() else 'N/A',
+                    #     'Reynolds Number': Re if 'Re' in locals() else 'N/A',
+                    #     'Specific Speed (Ns)': Ns if 'Ns' in locals() else 'N/A',
+                    #     'Suction Specific Speed (Nss)': Nss if 'Nss' in locals() else 'N/A',
+                    #     'Cavitation Index (σ)': sigma if 'sigma' in locals() else 'N/A',
+                    #     'BEP Flow (m3/h)': Q_bep * 3600 if 'Q_bep' in locals() and not np.isnan(Q_bep) else 'N/A',
+                    #     'Operating Flow (m3/h)': Q_op * 3600 if 'Q_op' in locals() else 'N/A',
+                    #     'Deviation from BEP (%)': pct_from_bep if 'pct_from_bep' in locals() else 'N/A',
+                    #     'Relative Wear Rate': wear_rate if 'wear_rate' in locals() else 'N/A',
+                    #     'Est. Service Life (hrs)': estimated_service_life if 'estimated_service_life' in locals() else 'N/A',
+                    #     'Vibration Risk': vibration_severity if 'vibration_severity' in locals() else 'N/A',
+                    #     'Pulsation Risk': pulsation_risk if 'pulsation_risk' in locals() else 'N/A',
+                    #     'Seal Life Est. (hrs)': seal_life_hours if 'seal_life_hours' in locals() else 'N/A',
+                    #     'Annual Energy (kWh)': annual_energy_kWh if 'annual_energy_kWh' in locals() else 'N/A',
+                    #     'Annual Cost (₹)': annual_cost if 'annual_cost' in locals() else 'N/A',
+                    #     '10-Year Energy Cost (₹)': ten_year_cost if 'ten_year_cost' in locals() else 'N/A',
+                    #     'Q_points': Q_points if 'Q_points' in locals() else [],
+                    #     'H_pump': H_pump if 'H_pump' in locals() else [],
+                    #     'eff_curve': eff_curve if 'eff_curve' in locals() else [],
+                    #     'power_curve': power_curve if 'power_curve' in locals() else [],
+                    #     'Process Parameters': {
+                    #         'Design Flow (m3/h)': Q_design * 3600 if 'Q_design' in locals() else 'N/A',
+                    #         'Operating Flow (m3/h)': Q_op * 3600 if 'Q_op' in locals() else 'N/A',
+                    #         'Design Head (m)': total_head_design if 'total_head_design' in locals() else 'N/A',
+                    #         'Static Head (m)': static_head if 'static_head' in locals() else 'N/A',
+                    #         'Efficiency (%)': eff_op * 100 if 'eff_op' in locals() else 'N/A'
+                    #     }
+                    # }
+                    # pdf_bytes = create_pdf_report_rotating(results_data_pdf)
+                    # st.download_button(
+                    #     label="Download PDF Report",
+                    #     data=pdf_bytes,
+                    #     file_name=f"pump_sizing_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    #     mime="application/pdf"
+                    # )
 
 
 
