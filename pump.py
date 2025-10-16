@@ -224,26 +224,26 @@ def create_pdf_report_rotating(results_data):
     styles = getSampleStyleSheet()
     story = []
 
-        # Title
-        story.append(Paragraph("Pump Sizing Report", styles['Title']))
-        story.append(Spacer(1, 12))
-        story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
-        story.append(Spacer(1, 12))
+    # Title
+    story.append(Paragraph("Pump Sizing Report", styles['Title']))
+    story.append(Spacer(1, 12))
+    story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
+    story.append(Spacer(1, 12))
 
-        # Summary table: pick top-level scalar items
-        rows = [("Parameter", "Value")]
-        for k, v in results_data.items():
-            if k in ['Q_points', 'H_pump', 'eff_curve', 'power_curve', 'Process Parameters']:
-                continue
-            val = v
-            try:
-                if hasattr(v, 'tolist') and not isinstance(v, (str, bytes)):
-                    val = str(v.tolist())
-                else:
-                    val = str(v)
-            except Exception:
+    # Summary table: pick top-level scalar items
+    rows = [("Parameter", "Value")]
+    for k, v in results_data.items():
+        if k in ['Q_points', 'H_pump', 'eff_curve', 'power_curve', 'Process Parameters']:
+            continue
+        val = v
+        try:
+            if hasattr(v, 'tolist') and not isinstance(v, (str, bytes)):
+                val = str(v.tolist())
+            else:
                 val = str(v)
-            rows.append((k, val))
+        except Exception:
+            val = str(v)
+        rows.append((k, val))
 
         table = Table(rows, colWidths=[200, 300])
         table.setStyle(TableStyle([
@@ -327,73 +327,72 @@ def create_pdf_report_rotating(results_data):
         data = buffer.getvalue()
         buffer.close()
         return data
-    else:
-        # Minimal pure-Python PDF fallback: build a single-page PDF with text
-        def fallback_simple_pdf(text_lines):
-            # Build PDF objects
-            lines = []
-            obj_offsets = []
-            offset = 0
 
-            def write(s):
-                nonlocal offset
-                b = s.encode('latin-1')
-                lines.append(b)
-                offset += len(b)
+def fallback_simple_pdf(text_lines):
+    # Build PDF objects
+    lines = []
+    obj_offsets = []
+    offset = 0
 
-            write('%PDF-1.1\n')
+    def write(s):
+        nonlocal offset
+        b = s.encode('latin-1')
+        lines.append(b)
+        offset += len(b)
 
-            # Object 1: Catalog
-            obj_offsets.append(offset)
-            write('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n')
+    write('%PDF-1.1\n')
 
-            # Object 2: Pages
-            obj_offsets.append(offset)
-            write('2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n')
+    # Object 1: Catalog
+    obj_offsets.append(offset)
+    write('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n')
 
-            # Object 3: Page
-            obj_offsets.append(offset)
-            write('3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 4 0 R >>\nendobj\n')
+    # Object 2: Pages
+    obj_offsets.append(offset)
+    write('2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n')
 
-            # Object 4: Font
-            obj_offsets.append(offset)
-            write('4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n')
+    # Object 3: Page
+    obj_offsets.append(offset)
+    write('3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 4 0 R >>\nendobj\n')
 
-            # Object 5: Content stream
-            text = '\\n'.join(text_lines)
-            content = 'BT /F1 12 Tf 72 720 Td (' + text.replace('(', '\(').replace(')', '\)') + ') Tj ET\n'
-            content_bytes = content.encode('latin-1')
-            obj_offsets.append(offset)
-            write('5 0 obj\n<< /Length %d >>\nstream\n' % len(content_bytes))
-            write(content)
-            write('\nendstream\nendobj\n')
+    # Object 4: Font
+    obj_offsets.append(offset)
+    write('4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n')
 
-            # xref
-            xref_offset = offset
-            write('xref\n0 %d\n' % (len(obj_offsets) + 1))
-            write('0000000000 65535 f \n')
-            cur = 0
-            for off in obj_offsets:
-                write('%010d 00000 n \n' % off)
+    # Object 5: Content stream
+    text = '\\n'.join(text_lines)
+    content = 'BT /F1 12 Tf 72 720 Td (' + text.replace('(', '\(').replace(')', '\)') + ') Tj ET\n'
+    content_bytes = content.encode('latin-1')
+    obj_offsets.append(offset)
+    write('5 0 obj\n<< /Length %d >>\nstream\n' % len(content_bytes))
+    write(content)
+    write('\nendstream\nendobj\n')
 
-            # trailer
-            write('trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n' % (len(obj_offsets) + 1, xref_offset))
+    # xref
+    xref_offset = offset
+    write('xref\n0 %d\n' % (len(obj_offsets) + 1))
+    write('0000000000 65535 f \n')
+    cur = 0
+    for off in obj_offsets:
+        write('%010d 00000 n \n' % off)
 
-            return b''.join(lines)
+    # trailer
+    write('trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n' % (len(obj_offsets) + 1, xref_offset))
 
-        # Build textual summary
-        summary_lines = [f'Pump Sizing Report - Generated: {datetime.now().isoformat()}']
-        for k, v in results_data.items():
-            if k in ['Q_points', 'H_pump', 'eff_curve', 'power_curve', 'Process Parameters']:
-                continue
-            try:
-                if hasattr(v, 'tolist') and not isinstance(v, (str, bytes)):
-                    val = str(v.tolist())
-                else:
-                    val = str(v)
-            except Exception:
+    return b''.join(lines)
+
+    # Build textual summary
+    summary_lines = [f'Pump Sizing Report - Generated: {datetime.now().isoformat()}']
+    for k, v in results_data.items():
+        if k in ['Q_points', 'H_pump', 'eff_curve', 'power_curve', 'Process Parameters']:
+            continue
+        try:
+            if hasattr(v, 'tolist') and not isinstance(v, (str, bytes)):
+                val = str(v.tolist())
+            else:
                 val = str(v)
-            summary_lines.append(f'{k}: {val}')
+        except Exception:
+            val = str(v)
+        summary_lines.append(f'{k}: {val}')
 
         # Include a short process parameter list if available
         pp = results_data.get('Process Parameters')
@@ -1112,7 +1111,13 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                         'H_pump': H_pump if 'H_pump' in locals() else [],
                         'eff_curve': eff_curve if 'eff_curve' in locals() else [],
                         'power_curve': power_curve if 'power_curve' in locals() else [],
-                        'Process Parameters': proc_params_export if 'proc_params_export' in locals() else {}
+                        'Process Parameters': {
+                            'Design Flow (m3/h)': Q_design * 3600 if 'Q_design' in locals() else 'N/A',
+                            'Operating Flow (m3/h)': Q_op * 3600 if 'Q_op' in locals() else 'N/A',
+                            'Design Head (m)': total_head_design if 'total_head_design' in locals() else 'N/A',
+                            'Static Head (m)': static_head if 'static_head' in locals() else 'N/A',
+                            'Efficiency (%)': eff_op * 100 if 'eff_op' in locals() else 'N/A'
+                        }
                     }
                     pdf_bytes = create_pdf_report_rotating(results_data_pdf)
                     st.download_button(
