@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -5,14 +6,22 @@ import math
 import matplotlib.pyplot as plt
 import io
 from datetime import datetime
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
 
 # Set page config at the very top
-st.set_page_config(page_title="Pump & Vacuum Pump Sizing Sheet", layout="wide")
-
-st.title("Pump & Vacuum Pump Sizing Sheet — Vendor Ready")
+st.set_page_config(page_title="Advanced Pump & Vacuum Sizing", layout="wide")
+st.title("🔧 Advanced Pump & Vacuum Pump Sizing Sheet — Vendor Ready")
 
 # Simple navigation between pages
-page = st.sidebar.selectbox("Choose tool", ["Rotating Pumps (Centrifugal etc.)", "Vacuum Pump Calculator"])
+page = st.sidebar.selectbox("Choose tool", [
+    "Rotating Pumps (Centrifugal etc.)", 
+    "Vacuum Pump Calculator",
+    "Pump System Comparison",
+    "Life Cycle Cost Analysis"
+])
 
 # ------------------ Helper functions ------------------
 def colebrook_f(Re, D, eps_rel, tol=1e-6, max_iter=50):
@@ -21,13 +30,10 @@ def colebrook_f(Re, D, eps_rel, tol=1e-6, max_iter=50):
         return np.nan
     if Re < 2300:
         return 64.0 / Re
-
-    # Handle edge cases for log calculations
     try:
         A = eps_rel / D / 3.7
         B = 5.74 / (Re**0.9)
         f = 0.25 / (math.log10(A + B))**2
-
         for _ in range(max_iter):
             denominator = eps_rel / (3.7*D) + 2.51/(Re*math.sqrt(f))
             if denominator <= 0:
@@ -39,8 +45,7 @@ def colebrook_f(Re, D, eps_rel, tol=1e-6, max_iter=50):
             f = new
         return f
     except (ValueError, ZeroDivisionError):
-        return 0.02  # Default friction factor for turbulent flow
-
+        return 0.02
 
 def darcy_head_loss(f, L, D, V, g=9.81):
     """Calculate head loss using Darcy-Weisbach equation"""
@@ -48,13 +53,11 @@ def darcy_head_loss(f, L, D, V, g=9.81):
         return 0
     return f * (L/D) * (V**2) / (2*g)
 
-
 def reynolds(rho, V, D, mu):
     """Calculate Reynolds number"""
     if mu <= 0:
         return 0
     return (rho * V * D) / mu
-
 
 def velocity_from_flow(Q, D):
     """Calculate velocity from flow rate and diameter"""
@@ -63,11 +66,9 @@ def velocity_from_flow(Q, D):
     A = math.pi * (D**2) / 4.0
     return Q / A if A > 0 else 0
 
-
 def minor_loss_head(K_total, V, g=9.81):
     """Calculate minor losses head"""
     return K_total * (V**2) / (2*g)
-
 
 def pump_power_required(rho, g, Q, H, pump_efficiency, motor_efficiency=0.95):
     """Calculate pump power requirements"""
@@ -77,6 +78,30 @@ def pump_power_required(rho, g, Q, H, pump_efficiency, motor_efficiency=0.95):
     electrical_watts = shaft_watts / motor_efficiency
     return shaft_watts/1000.0, electrical_watts/1000.0
 
+def calculate_affinity_laws(Q1, H1, N1, N2):
+    """Apply pump affinity laws for speed changes"""
+    Q2 = Q1 * (N2/N1)
+    H2 = H1 * (N2/N1)**2
+    P2_ratio = (N2/N1)**3
+    return Q2, H2, P2_ratio
+
+def calculate_parallel_pumps(n_pumps, Q_single, H_single):
+    """Calculate parallel pump operation"""
+    Q_total = n_pumps * Q_single
+    H_total = H_single  # Head remains same
+    return Q_total, H_total
+
+def calculate_series_pumps(n_pumps, Q_single, H_single):
+    """Calculate series pump operation"""
+    Q_total = Q_single  # Flow remains same
+    H_total = n_pumps * H_single
+    return Q_total, H_total
+
+def calculate_cavitation_index(NPSHa, H):
+    """Calculate Thoma cavitation number"""
+    if H <= 0:
+        return np.nan
+    return NPSHa / H
 
 def suggest_impeller(material):
     """Suggest impeller type based on material"""
@@ -89,24 +114,22 @@ def suggest_impeller(material):
         'Oil': 'Cast Iron or Stainless Steel',
         'Alkaline': 'Stainless Steel or hastelloy',
         'More': 'Consult vendor'
-
     }
     return mapping.get(material, 'Consult vendor')
 
 def suggest_density_range(fluid_type):
     """Suggest density range based on fluid type"""
     ranges = {
-        'Water': (990, 1000), # kg/m³
+        'Water': (990, 1000),
         'Seawater': (1020, 1030),
-        'Acids': (1050, 1840), # Depends heavily on acid type and concentration
-        'Slurry': (1100, 2000), # Highly variable
-        'Food-grade': (1000, 1500), # Depends on product
-        'Oil': (700, 950), # Depends on oil type
-        'Alkaline': (1050, 1500), # Depends on concentration
-        'More': (None, None) # For other types, no specific range suggested
+        'Acids': (1050, 1840),
+        'Slurry': (1100, 2000),
+        'Food-grade': (1000, 1500),
+        'Oil': (700, 950),
+        'Alkaline': (1050, 1500),
+        'More': (None, None)
     }
     return ranges.get(fluid_type, (None, None))
-
 
 def compute_bep(Q_points, eff_curve):
     """Find Best Efficiency Point"""
@@ -115,131 +138,374 @@ def compute_bep(Q_points, eff_curve):
     idx = np.nanargmax(eff_curve)
     return Q_points[idx], eff_curve[idx], idx
 
-
 def generate_pump_curves(Q_design, total_head_design, static_head):
     """Generate representative pump and system curves"""
     if Q_design <= 0:
-        Q_design = 1e-6  # Avoid division by zero
-
+        Q_design = 1e-6
     Q_points = np.linspace(max(1e-9, Q_design*0.1), Q_design*1.6, 200)
-
     # System curve
     a = (total_head_design - static_head) / (Q_design**2) if Q_design > 0 else 0
     H_system = static_head + a * (Q_points**2)
-
     # Pump curve
     H0 = total_head_design*1.15
     k = H0 / ((Q_design*1.4)**2) if Q_design > 0 else 0
     H_pump = H0 - k * (Q_points**2)
-
-    # Efficiency curve: peak near Q_design (BEP) with a bell shape
+    # Efficiency curve
     eff_curve = np.clip(0.45 + 0.4 * np.exp(-((Q_points-Q_design)/(Q_design*0.25))**2), 0.1, 0.95)
+    # Power curve
+    power_curve = np.zeros_like(Q_points)
+    for i, (q, h, eff) in enumerate(zip(Q_points, H_pump, eff_curve)):
+        if eff > 0:
+            power_curve[i] = 1000 * 9.81 * q * h / eff / 1000.0
+    return Q_points, H_system, H_pump, eff_curve, power_curve
 
-    return Q_points, H_system, H_pump, eff_curve
+def calculate_suction_specific_speed(N, Q, NPSHr):
+    """Calculate suction specific speed (Nss)"""
+    if NPSHr <= 0:
+        return np.nan
+    # Nss = N * sqrt(Q) / (NPSHr)^0.75
+    return N * np.sqrt(Q * 3600) / (NPSHr**0.75)
 
+def estimate_wear_rate(material_type, V, particle_size=0):
+    """Estimate relative wear rate"""
+    base_wear = {'Water': 1, 'Seawater': 2, 'Acids': 3, 'Slurry': 10, 
+                 'Food-grade': 1, 'Oil': 0.5, 'Alkaline': 2, 'More': 1}
+    wear = base_wear.get(material_type, 1)
+    # Velocity impact
+    if V > 3:
+        wear *= (1 + 0.5 * (V - 3))
+    # Particle impact for slurry
+    if material_type == 'Slurry' and particle_size > 0:
+        wear *= (1 + particle_size/10)
+    return wear
 
-def create_excel_report_rotating(df_summary, inputs_echo, fig_png_bytes):
-    """Create Excel report for rotating pumps"""
-    output = io.BytesIO()
+# --- NEW: Missing Helper Functions for Rotating Pumps ---
+def calculate_vibration_severity(V, Re, material_type):
+    """Estimate vibration severity based on velocity and flow regime"""
+    severity = "Low"
+    color = "green"
+    if V > 4.0:
+        severity = "High"
+        color = "red"
+    elif V > 3.0 or (Re > 10000 and material_type in ['Slurry', 'Acids']):
+        severity = "Medium"
+        color = "orange"
+    return severity, color
+
+def calculate_pressure_pulsation(pump_type, Q_op, Q_bep):
+    """Estimate pulsation risk based on operating point vs BEP"""
+    if pump_type.lower() in ['centrifugal', 'axial']:
+        if abs(Q_op - Q_bep) / Q_bep > 0.3:
+            return "High", "red"
+        elif abs(Q_op - Q_bep) / Q_bep > 0.15:
+            return "Medium", "orange"
+        else:
+            return "Low", "green"
+    else: # Assume PD pumps have inherent pulsation
+        return "Medium", "orange"
+
+def estimate_seal_life(material_type, T, V):
+    """Estimate mechanical seal life based on fluid, temp, velocity"""
+    base_life = 20000 # hours
+    temp_factor = max(0.5, min(1.5, 1.0 - (T - 25) * 0.005)) # Degrades above 25C
+    velocity_factor = max(0.5, 1.0 - V * 0.05) # Degrades with velocity
+    material_factor = {'Water': 1.0, 'Seawater': 0.8, 'Acids': 0.7, 'Slurry': 0.5,
+                       'Food-grade': 0.9, 'Oil': 1.0, 'Alkaline': 0.7, 'More': 0.8}.get(material_type, 0.8)
+    
+    estimated_hours = base_life * temp_factor * velocity_factor * material_factor
+    return estimated_hours
+# --- END NEW FUNCTIONS ---
+
+# --- PDF Report Generation ---
+def create_pdf_report_rotating(results_data):
+    """Create a simple PDF report from results_data and return bytes."""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4)
+    styles = getSampleStyleSheet()
+    story = []
+
+        # Title
+        story.append(Paragraph("Pump Sizing Report", styles['Title']))
+        story.append(Spacer(1, 12))
+        story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
+        story.append(Spacer(1, 12))
+
+        # Summary table: pick top-level scalar items
+        rows = [("Parameter", "Value")]
+        for k, v in results_data.items():
+            if k in ['Q_points', 'H_pump', 'eff_curve', 'power_curve', 'Process Parameters']:
+                continue
+            val = v
+            try:
+                if hasattr(v, 'tolist') and not isinstance(v, (str, bytes)):
+                    val = str(v.tolist())
+                else:
+                    val = str(v)
+            except Exception:
+                val = str(v)
+            rows.append((k, val))
+
+        table = Table(rows, colWidths=[200, 300])
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+            ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ]))
+        story.append(table)
+        story.append(Spacer(1, 12))
+
+        # Optional: include a short process parameters table if present
+        pp = results_data.get('Process Parameters')
+        if pp:
+            story.append(Paragraph('Process Parameters', styles['h2']))
+            pp_rows = [("Parameter", "Value")]
+            if isinstance(pp, dict):
+                for k, v in pp.items():
+                    pp_rows.append((k, str(v)))
+            elif isinstance(pp, (list, tuple)):
+                for item in pp:
+                    if isinstance(item, (list, tuple)) and len(item) >= 2:
+                        pp_rows.append((str(item[0]), str(item[1])))
+            pp_table = Table(pp_rows, colWidths=[200, 300])
+            pp_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+                ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+            ]))
+            story.append(pp_table)
+
+        # Embed charts (render matplotlib figures to PNG and insert)
+        try:
+            Q_pts = np.array(results_data.get('Q_points', []))
+            H_pts = np.array(results_data.get('H_pump', []))
+            eff_pts = np.array(results_data.get('eff_curve', []))
+            pwr_pts = np.array(results_data.get('power_curve', []))
+
+            # Only render if we have Q and H data
+            if Q_pts.size and H_pts.size:
+                fig, ax = plt.subplots(figsize=(6, 3.5))
+                ax.plot(Q_pts * 3600, H_pts, 'r-', linewidth=2, label='Pump Curve')
+                ax.set_xlabel('Flow (m³/h)')
+                ax.set_ylabel('Head (m)')
+                ax.set_title('Pump Curve')
+                ax.grid(True, alpha=0.3)
+                buf = io.BytesIO()
+                plt.tight_layout()
+                fig.savefig(buf, format='png', dpi=150)
+                plt.close(fig)
+                buf.seek(0)
+                img = RLImage(buf, width=A4[0]-100, height=(A4[1]/4))
+                story.append(Spacer(1, 12))
+                story.append(img)
+
+            # Efficiency or Power figure
+            if Q_pts.size and (eff_pts.size or pwr_pts.size):
+                fig2, ax2 = plt.subplots(figsize=(6, 3.5))
+                if eff_pts.size:
+                    ax2.plot(Q_pts * 3600, eff_pts * 100, 'g-', linewidth=2, label='Efficiency (%)')
+                    ax2.set_ylabel('Efficiency (%)')
+                if pwr_pts.size:
+                    ax3 = ax2.twinx()
+                    ax3.plot(Q_pts * 3600, pwr_pts, 'purple', linewidth=2, label='Power (kW)')
+                    ax3.set_ylabel('Power (kW)')
+                ax2.set_xlabel('Flow (m³/h)')
+                ax2.set_title('Efficiency & Power')
+                ax2.grid(True, alpha=0.3)
+                buf2 = io.BytesIO()
+                plt.tight_layout()
+                fig2.savefig(buf2, format='png', dpi=150)
+                plt.close(fig2)
+                buf2.seek(0)
+                img2 = RLImage(buf2, width=A4[0]-100, height=(A4[1]/4))
+                story.append(Spacer(1, 12))
+                story.append(img2)
+        except Exception:
+            # If plotting or embedding fails, continue without images
+            pass
+
+        doc.build(story)
+        buffer.seek(0)
+        data = buffer.getvalue()
+        buffer.close()
+        return data
+    else:
+        # Minimal pure-Python PDF fallback: build a single-page PDF with text
+        def fallback_simple_pdf(text_lines):
+            # Build PDF objects
+            lines = []
+            obj_offsets = []
+            offset = 0
+
+            def write(s):
+                nonlocal offset
+                b = s.encode('latin-1')
+                lines.append(b)
+                offset += len(b)
+
+            write('%PDF-1.1\n')
+
+            # Object 1: Catalog
+            obj_offsets.append(offset)
+            write('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n')
+
+            # Object 2: Pages
+            obj_offsets.append(offset)
+            write('2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n')
+
+            # Object 3: Page
+            obj_offsets.append(offset)
+            write('3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 4 0 R >>\nendobj\n')
+
+            # Object 4: Font
+            obj_offsets.append(offset)
+            write('4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n')
+
+            # Object 5: Content stream
+            text = '\\n'.join(text_lines)
+            content = 'BT /F1 12 Tf 72 720 Td (' + text.replace('(', '\(').replace(')', '\)') + ') Tj ET\n'
+            content_bytes = content.encode('latin-1')
+            obj_offsets.append(offset)
+            write('5 0 obj\n<< /Length %d >>\nstream\n' % len(content_bytes))
+            write(content)
+            write('\nendstream\nendobj\n')
+
+            # xref
+            xref_offset = offset
+            write('xref\n0 %d\n' % (len(obj_offsets) + 1))
+            write('0000000000 65535 f \n')
+            cur = 0
+            for off in obj_offsets:
+                write('%010d 00000 n \n' % off)
+
+            # trailer
+            write('trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n' % (len(obj_offsets) + 1, xref_offset))
+
+            return b''.join(lines)
+
+        # Build textual summary
+        summary_lines = [f'Pump Sizing Report - Generated: {datetime.now().isoformat()}']
+        for k, v in results_data.items():
+            if k in ['Q_points', 'H_pump', 'eff_curve', 'power_curve', 'Process Parameters']:
+                continue
+            try:
+                if hasattr(v, 'tolist') and not isinstance(v, (str, bytes)):
+                    val = str(v.tolist())
+                else:
+                    val = str(v)
+            except Exception:
+                val = str(v)
+            summary_lines.append(f'{k}: {val}')
+
+        # Include a short process parameter list if available
+        pp = results_data.get('Process Parameters')
+        if pp:
+            summary_lines.append('--- Process Parameters ---')
+            if isinstance(pp, dict):
+                for k, v in pp.items():
+                    summary_lines.append(f'{k}: {v}')
+            elif isinstance(pp, (list, tuple)):
+                for item in pp:
+                    if isinstance(item, (list, tuple)) and len(item) >= 2:
+                        summary_lines.append(f'{item[0]}: {item[1]}')
+
+        return fallback_simple_pdf(summary_lines)
+
+# --- Excel read helper (for future import/upload) ---
+def read_excel_helper(uploaded_file) -> pd.DataFrame:
+    """Read an uploaded Excel or CSV into a pandas DataFrame.
+
+    Accepts streamlit UploadedFile or path-like object.
+    """
+    if uploaded_file is None:
+        return pd.DataFrame()
+    name = getattr(uploaded_file, 'name', '')
     try:
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df_summary.to_excel(writer, index=False, sheet_name='Summary')
-            inputs_echo.to_excel(writer, index=False, sheet_name='Inputs')
+        if name.lower().endswith('.csv'):
+            return pd.read_csv(uploaded_file)
+        else:
+            return pd.read_excel(uploaded_file)
+    except Exception:
+        # Fallback: try reading as CSV with io
+        try:
+            content = uploaded_file.read()
+            return pd.read_csv(io.BytesIO(content))
+        except Exception:
+            return pd.DataFrame()
 
-            if fig_png_bytes is not None:
-                workbook = writer.book
-                worksheet = writer.sheets['Summary']
-                # Insert image at cell G2
-                worksheet.insert_image('G2', 'pump_curves.png', {'image_data': io.BytesIO(fig_png_bytes)})
-
-        output.seek(0)
-        return output.getvalue()
-    except Exception as e:
-        st.error(f"Error creating Excel report: {e}")
-        return None
-
-
-def create_excel_report_vacuum(df_vac, fig_png_bytes):
-    """Create Excel report for vacuum pumps"""
-    output = io.BytesIO()
-    try:
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df_vac.to_excel(writer, index=False, sheet_name='Vacuum')
-
-            if fig_png_bytes is not None:
-                workbook = writer.book
-                worksheet = writer.sheets['Vacuum']
-                worksheet.insert_image('G2', 'vacuum_curve.png', {'image_data': io.BytesIO(fig_c_png)})
-
-        output.seek(0)
-        return output.getvalue()
-    except Exception as e:
-        st.error(f"Error creating Excel report: {e}")
-        return None
+# --- END helpers ---
 
 # ------------------ Rotating Pumps Page ------------------
 if page == "Rotating Pumps (Centrifugal etc.)":
-    st.header("Rotating Pump Sizing & Selection")
-
+    st.header("🔄 Rotating Pump Sizing & Selection")
     with st.form(key='rotating'):
-        st.subheader("Process & Fluid Data")
-        Q_input = st.number_input("Flow rate", value=100.0, min_value=0.0, format="%.6f")
-        Q_unit = st.selectbox("Flow unit", ['m³/h', 'L/s', 'm³/s', 'm³/d', 'GPM (US)'], index=0)
-        T = st.number_input("Fluid temperature (°C)", value=25.0)
-        material_type = st.selectbox("Fluid type", ['Water', 'Seawater', 'Acids', 'Alkaline', 'Slurry', 'Food-grade', 'Oil', 'More']) # Updated fluid type dropdown
-        SG = st.number_input("Specific gravity (relative to water)", value=1.0, min_value=0.01)
-        mu_cP = st.number_input("Viscosity (cP)", value=1.0, min_value=0.01)
-        density = 1000.0 * SG
-
-        density_range = suggest_density_range(material_type)
-        if density_range[0] is not None:
-            st.info(f"Suggested density range for {material_type}: {density_range[0]:.0f} - {density_range[1]:.0f} kg/m³")
-
-
-        if st.checkbox("Override density (kg/m³)?", value=False):
-            density = st.number_input("Density (kg/m³)", value=1000.0, min_value=0.1)
-
-        # Display calculated density
-        st.write(f"**Calculated Density:** {density:.2f} kg/m³")
-
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Process & Fluid Data")
+            Q_input = st.number_input("Flow rate", value=100.0, min_value=0.0, format="%.6f")
+            Q_unit = st.selectbox("Flow unit", ['m³/h', 'L/s', 'm³/s', 'm³/d', 'GPM (US)'], index=0)
+            T = st.number_input("Fluid temperature (°C)", value=25.0)
+            material_type = st.selectbox("Fluid type", ['Water', 'Seawater', 'Acids', 'Alkaline', 'Slurry', 'Food-grade', 'Oil', 'More'])
+            SG = st.number_input("Specific gravity", value=1.0, min_value=0.01)
+            mu_cP = st.number_input("Viscosity (cP)", value=1.0, min_value=0.01)
+            if material_type == 'Slurry':
+                particle_size = st.number_input("Average particle size (mm)", value=0.0, min_value=0.0)
+            else:
+                particle_size = 0
+            density = 1000.0 * SG
+            density_range = suggest_density_range(material_type)
+            if density_range[0] is not None:
+                st.info(f"Suggested density: {density_range[0]:.0f} - {density_range[1]:.0f} kg/m³")
+            if st.checkbox("Override density (kg/m³)?", value=False):
+                density = st.number_input("Density (kg/m³)", value=1000.0, min_value=0.1)
+            st.write(f"**Calculated Density:** {density:.2f} kg/m³")
+        with col2:
+            st.subheader("Piping & Elevation")
+            D_inner = st.number_input("Pipe inner diameter (mm)", value=100.0, min_value=1.0)
+            L_pipe = st.number_input("Pipe length (m)", value=100.0, min_value=0.0)
+            elevation_in = st.number_input("Suction elevation (m)", value=0.0)
+            elevation_out = st.number_input("Discharge elevation (m)", value=10.0)
+            K_fittings = st.number_input("Total K (fittings)", value=2.0, min_value=0.0)
+            eps_mm = st.number_input("Roughness (mm)", value=0.045, min_value=0.0001)
+            st.subheader("Multiple Pump Configuration")
+            pump_config = st.selectbox("Pump arrangement", ['Single', 'Parallel (n pumps)', 'Series (n pumps)'])
+            if pump_config != 'Single':
+                n_pumps = st.number_input("Number of pumps", value=2, min_value=2, max_value=10)
+            else:
+                n_pumps = 1
         st.markdown("---")
-        st.subheader("Piping & Elevation")
-        D_inner = st.number_input("Pipe inner diameter (mm)", value=100.0, min_value=1.0)
-        L_pipe = st.number_input("Pipe length (m)", value=100.0, min_value=0.0)
-        elevation_in = st.number_input("Suction elevation (m)", value=0.0)
-        elevation_out = st.number_input("Discharge elevation (m)", value=10.0)
-        K_fittings = st.number_input("Total equivalent K (sum of fittings)", value=2.0, min_value=0.0)
-        eps_mm = st.number_input("Absolute roughness (mm)", value=0.045, min_value=0.0001)
-
+        col3, col4 = st.columns(2)
+        with col3:
+            st.subheader("Pump & Motor Settings")
+            pump_eff_user = st.number_input("Pump efficiency (%)", value=70.0, min_value=1.0, max_value=100.0)/100.0
+            motor_eff = st.number_input("Motor efficiency (%)", value=95.0, min_value=10.0, max_value=100.0)/100.0
+            safety_margin_head = st.number_input("Design margin on head (%)", value=10.0, min_value=0.0)/100.0
+            safety_margin_flow = st.number_input("Design margin on flow (%)", value=10.0, min_value=0.0)/100.0
+            service_factor = st.number_input("Service factor", value=1.15, min_value=1.0)
+            pump_speed_rpm = st.number_input("Pump speed (RPM)", value=1450.0, min_value=100.0)
+        with col4:
+            st.subheader("Application & NPSH")
+            application = st.selectbox("Application", ['General Transfer', 'Chemical Handling', 'Slurry Transport', 
+                                                       'Oil Transfer', 'High Pressure', 'Metering'])
+            atm_pressure_kPa = st.number_input("Atmospheric pressure (kPa)", value=101.325, min_value=50.0)
+            vapor_pressure_kPa = st.number_input("Vapor pressure (kPa)", value=2.3, min_value=0.0)
+            friction_for_NPSH = st.number_input("Suction friction head (m)", value=2.0, min_value=0.0)
+            NPSHr_vendor = st.number_input("Vendor NPSHr (m) [optional]", value=0.0, min_value=0.0)
         st.markdown("---")
-        st.subheader("Pump & Motor Settings")
-        pump_eff_user = st.number_input("Pump efficiency (%) [if known]", value=70.0, min_value=1.0, max_value=100.0)/100.0
-        motor_eff = st.number_input("Motor efficiency (%)", value=95.0, min_value=10.0, max_value=100.0)/100.0
-        safety_margin_head = st.number_input("Design margin on head (%)", value=10.0, min_value=0.0)/100.0
-        safety_margin_flow = st.number_input("Design margin on flow (%)", value=10.0, min_value=0.0)/100.0
-        service_factor = st.number_input("Service factor (e.g. 1.15)", value=1.15, min_value=1.0)
-
-        st.markdown("---")
-        st.subheader("Application & Materials")
-        # material_type = st.selectbox("Fluid type for impeller suggestion", ['Water', 'Seawater', 'Acids', 'Alkaline', 'Slurry', 'Food-grade', 'Oil', 'More']) # Already defined above
-        application = st.selectbox("Application Type", ['General Transfer', 'Chemical Handling', 'Slurry Transport', 'Oil Transfer', 'High Pressure', 'Metering'])
-
-
-        st.markdown("---")
-        st.subheader("NPSH & Vapor Data")
-        atm_pressure_kPa = st.number_input("Atmospheric pressure (kPa)", value=101.325, min_value=50.0)
-        vapor_pressure_kPa = st.number_input("Fluid vapor pressure (kPa)", value=2.3, min_value=0.0)
-        friction_for_NPSH = st.number_input("Suction-side friction (head, m)", value=2.0, min_value=0.0)
-
-        st.markdown("---")
-        st.subheader("Vendor Catalog Matching (optional CSV upload)")
-        uploaded = st.file_uploader("Upload pump catalog CSV (columns: name, flow_m3h, head_m, power_kW, speed_rpm, npshr_m)", type=['csv'])
-
-        submitted = st.form_submit_button("Calculate")
+        st.subheader("Advanced Analysis Options")
+        col5, col6 = st.columns(2)
+        with col5:
+            show_affinity = st.checkbox("Analyze speed variations", value=True)
+            show_wear_analysis = st.checkbox("Show wear analysis", value=True)
+        with col6:
+            show_energy_cost = st.checkbox("Calculate energy costs", value=True)
+            if show_energy_cost:
+                # --- CHANGED DEFAULT COST AND UNIT ---
+                electricity_cost = st.number_input("Electricity cost (₹/kWh)", value=10.0, min_value=0.0) # Changed default and unit
+                operating_hours = st.number_input("Operating hours/year", value=8000.0, min_value=0.0)
+        submitted = st.form_submit_button("🚀 Calculate", type="primary")
 
     if submitted:
         try:
-            # Flow unit conversion
+            # Flow conversion
             if Q_unit == 'm³/h':
                 Q_m3s = Q_input / 3600.0
             elif Q_unit == 'L/s':
@@ -251,7 +517,7 @@ if page == "Rotating Pumps (Centrifugal etc.)":
             else:
                 Q_m3s = Q_input
 
-            # Convert units and calculate
+            # Basic calculations
             mu = mu_cP / 1000.0
             D = D_inner / 1000.0
             V = velocity_from_flow(Q_m3s, D)
@@ -264,349 +530,665 @@ if page == "Rotating Pumps (Centrifugal etc.)":
             total_head_design = total_head * (1.0 + safety_margin_head)
             Q_design = Q_m3s * (1.0 + safety_margin_flow)
 
-            # Pump efficiency
-            pump_eff = pump_eff_user
+            # Multiple pump configuration
+            if pump_config == 'Parallel (n pumps)':
+                Q_total, H_total = calculate_parallel_pumps(n_pumps, Q_design, total_head_design)
+                st.info(f"**Parallel Configuration:** {n_pumps} pumps × {Q_design*3600:.1f} m³/h each = {Q_total*3600:.1f} m³/h total")
+                Q_design_per_pump = Q_design
+                H_design_per_pump = total_head_design
+            elif pump_config == 'Series (n pumps)':
+                Q_total, H_total = calculate_series_pumps(n_pumps, Q_design, total_head_design)
+                st.info(f"**Series Configuration:** {n_pumps} pumps × {total_head_design:.1f} m each = {H_total:.1f} m total")
+                Q_design_per_pump = Q_design
+                H_design_per_pump = total_head_design / n_pumps
+            else:
+                Q_design_per_pump = Q_design
+                H_design_per_pump = total_head_design
 
+            pump_eff = pump_eff_user
             shaft_kW, electrical_kW = pump_power_required(density, 9.81, Q_design, total_head_design, pump_eff, motor_eff)
 
-            # NPSH calculation
+            # NPSH calculations
             P_atm_Pa = atm_pressure_kPa * 1000.0
             P_vap_Pa = vapor_pressure_kPa * 1000.0
             z_suction = elevation_in
             NPSHa = (P_atm_Pa - P_vap_Pa)/(density*9.81) + z_suction - friction_for_NPSH
+            sigma = calculate_cavitation_index(NPSHa, total_head_design)
 
-            # Pump type suggestion
-            pump_suggestions = {
-                ('Water', 'General Transfer'): 'Centrifugal Pump',
-                ('Seawater', 'General Transfer'): 'Centrifugal Pump', # Added Seawater suggestion
-                ('Acids', 'Chemical Handling'): 'Magnetic Drive Pump',
-                ('Slurry', 'Slurry Transport'): 'Slurry Pump',
-                ('Food-grade', 'Oil Transfer'): 'Gear Pump',
-                ('Slurry', 'High Pressure'): 'Positive Displacement Pump',
-                ('Oil', 'General Transfer'): 'Centrifugal Pump',
-                ('Oil', 'High Pressure'): 'Positive Displacement Pump',
-                 ('Alkaline', 'Chemical Handling'): 'Magnetic Drive Pump', # Added Alkaline suggestion
-                ('More', 'General Transfer'): 'Consult vendor for best selection', # Added More suggestion
-            }
-            pump_type = pump_suggestions.get((material_type, application), 'Consult vendor for best selection')
+            if NPSHr_vendor > 0:
+                NPSH_margin = NPSHa - NPSHr_vendor
+                if NPSH_margin < 0.5:
+                    npsh_warning = "⚠️ CRITICAL: NPSH margin too low! Risk of cavitation."
+                elif NPSH_margin < 1.0:
+                    npsh_warning = "⚡ WARNING: Low NPSH margin. Consider design modifications."
+                else:
+                    npsh_warning = "✅ Adequate NPSH margin"
+            else:
+                NPSH_margin = np.nan
+                npsh_warning = "No vendor NPSHr provided"
 
-            # Generate curves and BEP
-            Q_points, H_system, H_pump, eff_curve = generate_pump_curves(Q_design, total_head_design, static_head)
+            # Specific speed
+            Ns = pump_speed_rpm * math.sqrt(Q_design*3600.0) / (total_head_design**0.75) if total_head_design > 0 else np.nan
+
+            # Suction specific speed
+            if NPSHr_vendor > 0:
+                Nss = calculate_suction_specific_speed(pump_speed_rpm, Q_design, NPSHr_vendor)
+            else:
+                Nss = np.nan
+
+            # Generate curves
+            Q_points, H_system, H_pump, eff_curve, power_curve = generate_pump_curves(Q_design, total_head_design, static_head)
             Q_bep, eff_bep, bep_idx = compute_bep(Q_points, eff_curve)
 
-            # Operating point: intersection approx (min squared diff)
+            # Operating point
             if len(H_pump) > 0 and len(H_system) > 0:
                 idx_op = np.argmin((H_pump - H_system)**2)
                 Q_op = Q_points[idx_op]
                 H_op = H_pump[idx_op]
                 eff_op = eff_curve[idx_op]
+                power_op = power_curve[idx_op]
             else:
                 Q_op = Q_design
                 H_op = total_head_design
                 eff_op = pump_eff
+                power_op = shaft_kW
 
-            # Specific Speed calculation
-            rep_speed_rpm = 1450.0
-            Ns = rep_speed_rpm * math.sqrt(Q_design*3600.0) / (H_op**0.75) if H_op > 0 else np.nan
-
-            # BEP derating check
             pct_from_bep = abs((Q_op - Q_bep)/Q_bep) * 100.0 if Q_bep > 0 else np.nan
-            if pct_from_bep <= 10:
-                derating_recommendation = 'Good — operating point within 10% of BEP.'
-            elif pct_from_bep <= 20:
-                derating_recommendation = 'Acceptable — consider 5-10% derating or impeller trimming advice.'
-            else:
-                derating_recommendation = 'Poor — operating point far from BEP. Recommend different pump size or positive displacement pump.'
 
-            # Service factor and motor sizing
+            # Wear analysis
+            if show_wear_analysis:
+                wear_rate = estimate_wear_rate(material_type, V, particle_size)
+                estimated_service_life = 50000 / wear_rate  # hours
+
+            # Vibration and reliability analysis
+            vibration_severity, vib_color = calculate_vibration_severity(V, Re, material_type)
+            pulsation_risk, pulse_color = calculate_pressure_pulsation('Centrifugal', Q_op, Q_bep)
+            seal_life_hours = estimate_seal_life(material_type, T, V)
             motor_rated_kW = electrical_kW * service_factor
 
-            # Create summary DataFrame
-            summary = {
-                'Item': ['Flow (m3/s)', 'Flow (m3/h)', 'Design Flow (m3/s)', 'Velocity (m/s)', 'Reynolds number',
-                         'Friction factor (Darcy)', 'Pipe friction head (m)', 'Minor losses head (m)', 'Static head (m)',
-                         'Total dynamic head (m)', 'Design total head (m)', 'Shaft power (kW)', 'Electrical power (kW)',
-                         'Motor rated (kW)', 'Pump efficiency (%)', 'Motor efficiency (%)', 'NPSH Available (m)',
-                         'Specific speed (Ns)', 'BEP Flow (m3/s)', 'Operating Flow (m3/s)', 'Distance from BEP (%)',
-                         'BEP Recommendation'],
-                'Value': [Q_m3s, Q_m3s*3600.0, Q_design, V, Re, f, hf, hm, static_head, total_head, total_head_design,
-                         shaft_kW, electrical_kW, motor_rated_kW, pump_eff*100.0, motor_eff*100.0, NPSHa, Ns,
-                         Q_bep, Q_op, pct_from_bep, derating_recommendation]
-            }
-            df_summary = pd.DataFrame(summary)
-
-            # Inputs echo
-            inputs_echo = pd.DataFrame({
-                'Input': ['Flow (user units)', 'Flow unit', 'Temperature (°C)', 'Specific gravity', 'Viscosity (cP)',
-                         'Pipe D (mm)', 'Pipe L (m)', 'K fittings', 'Roughness (mm)', 'Pump eff (%)',
-                         'Motor eff (%)', 'Service factor', 'Fluid type', 'Application'],
-                'Value': [Q_input, Q_unit, T, SG, mu_cP, D_inner, L_pipe, K_fittings, eps_mm,
-                         pump_eff_user*100.0, motor_eff*100.0, service_factor, material_type, application]
-            })
-
-
-            # Create plots
-            fig, ax = plt.subplots(figsize=(10, 6))
-            ax.plot(Q_points*3600.0, H_system, label='System curve', linewidth=2)
-            ax.plot(Q_points*3600.0, H_pump, label='Pump curve', linewidth=2)
-            ax.scatter([Q_bep*3600.0], [H_pump[bep_idx]], color='green', s=100, label='BEP', zorder=5)
-            ax.scatter([Q_op*3600.0], [H_op], color='red', s=100, label='Operating point', zorder=5)
-            ax.set_xlabel('Flow (m³/h)')
-            ax.set_ylabel('Head (m)')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            ax.set_title('Pump and System Curves')
-
-            # Add annotations
-            if not np.isnan(Q_bep) and not np.isnan(H_pump[bep_idx]):
-                ax.annotate(f'BEP: {Q_bep*3600.0:.1f} m³/h',
-                           xy=(Q_bep*3600.0, H_pump[bep_idx]),
-                           xytext=(Q_bep*3600.0*1.1, H_pump[bep_idx]+max(H_pump)*0.05),
-                           arrowprops=dict(arrowstyle='->', color='green'))
-
-            if not np.isnan(Q_op) and not np.isnan(H_op):
-                ax.annotate(f'OP: {Q_op*3600.0:.1f} m³/h',
-                           xy=(Q_op*3600.0, H_op),
-                           xytext=(Q_op*3600.0*0.7, H_op+max(H_pump)*0.1),
-                           arrowprops=dict(arrowstyle='->', color='red'))
-
-            plt.tight_layout()
-            buf = io.BytesIO()
-            fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-            fig_png = buf.getvalue()
-            buf.close()
-            plt.close(fig)
-
-            # Power and efficiency plots
-            fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-
-            # Power curve
-            power_curve = density * 9.81 * Q_points * H_pump / pump_eff / 1000.0
-            ax1.plot(Q_points*3600.0, power_curve, linewidth=2)
-            ax1.set_title('Power vs Flow')
-            ax1.set_xlabel('Flow (m³/h)')
-            ax1.set_ylabel('Power (kW)')
-            ax1.axvline(Q_op*3600.0, color='red', linestyle='--', alpha=0.7)
-            ax1.grid(True, alpha=0.3)
-
-            # Efficiency curve
-            ax2.plot(Q_points*3600.0, eff_curve*100.0, linewidth=2)
-            ax2.set_title('Estimated Efficiency vs Flow')
-            ax2.set_xlabel('Flow (m³/h)')
-            ax2.set_ylabel('Efficiency (%)')
-            ax2.axvline(Q_bep*3600.0, color='green', linestyle='--', alpha=0.7)
-            ax2.grid(True, alpha=0.3)
-
-            plt.tight_layout()
-            buf2 = io.BytesIO()
-            fig2.savefig(buf2, format='png', dpi=150, bbox_inches='tight')
-            fig2_png = buf2.getvalue()
-            buf2.close()
-            plt.close(fig2)
-
-            # Inference texts
-            inference_system = f"Operating point at {Q_op*3600.0:.1f} m³/h intersects pump and system curves at ~{H_op:.2f} m. BEP is {Q_bep*3600.0:.1f} m³/h. {derating_recommendation}"
-            inference_power = f"At operating flow the estimated shaft power is {density*9.81*Q_op*H_op/pump_eff/1000.0:.2f} kW (shaft). Check motor rating and service factor ({service_factor})."
-            inference_eff = f"Estimated efficiency at operating point: {eff_op*100.0:.1f}%. BEP efficiency: {eff_bep*100.0:.1f}% at {Q_bep*3600.0:.1f} m³/h."
-
-            # Vendor catalog matching
-            matched_pumps = None
-            if uploaded is not None:
-                try:
-                    catalog = pd.read_csv(uploaded)
-                    # Simple filter: find rows where flow and head within +/-20%
-                    flow_m3h = Q_design*3600.0
-                    head_m = total_head_design
-
-                    # Check if required columns exist
-                    required_cols = ['name', 'flow_m3h', 'head_m', 'power_kW', 'speed_rpm', 'npshr_m']
-                    if all(col in catalog.columns for col in required_cols):
-                        candidates = catalog[
-                            (catalog['flow_m3h'] > 0.8*flow_m3h) &
-                            (catalog['flow_m3h'] < 1.2*flow_m3h) &
-                            (catalog['head_m'] > 0.8*head_m) &
-                            (catalog['head_m'] < 1.2*head_m)
-                        ]
-
-                        if not candidates.empty:
-                            matched_pumps = candidates.copy()
-                            matched_pumps['score'] = 1 - (
-                                abs(matched_pumps['flow_m3h'] - flow_m3h)/flow_m3h +
-                                abs(matched_pumps['head_m'] - head_m)/head_m
-                            )/2
-                            matched_pumps = matched_pumps.sort_values('score', ascending=False)
-                    else:
-                        st.warning(f'CSV missing required columns. Expected: {required_cols}')
-
-                except Exception as e:
-                    st.warning(f'Failed to parse catalog CSV: {e}')
-
             # Display results
-            st.success("Calculation complete — see summary below")
+            st.success("✅ Calculation Complete")
+            # Create tabs for different views
+            tab1, tab2, tab3, tab4 = st.tabs(["📊 Results Summary", "📈 Performance Curves", "⚙️ Advanced Analysis", "💰 Cost Analysis"])
 
-            col1, col2 = st.columns([2, 1])
-
-            with col1:
-                st.subheader("Calculated Results")
-                st.dataframe(df_summary, use_container_width=True)
-
-                # Add alerts for Process Data based on calculated values
-                st.markdown("---")
-                st.subheader("Process Data Insights")
-                if Re < 2300:
-                    st.info(f"Reynolds number ({Re:.1f}) indicates Laminar flow. Viscosity has a significant impact on head loss in this regime.")
-                elif Re > 4000:
-                    st.info(f"Reynolds number ({Re:.1f}) indicates Turbulent flow. Pipe roughness significantly impacts head loss.")
-                else:
-                    st.info(f"Reynolds number ({Re:.1f}) indicates Transitional flow.")
-
-                if mu_cP > 100:
-                    st.warning(f"High viscosity ({mu_cP:.1f} cP) can significantly reduce pump performance and efficiency, especially for centrifugal pumps. Consider positive displacement pumps for very high viscosities.")
-                if density > 1200:
-                    st.warning(f"High density ({density:.1f} kg/m³) will result in higher power consumption for the same head. Ensure motor is adequately sized.")
-                if V > 3:
-                    st.warning(f"High velocity ({V:.1f} m/s) can lead to increased pipe friction losses and potential erosion.")
-                elif V < 0.5:
-                    st.warning(f"Low velocity ({V:.1f} m/s) may lead to settling of solids if handling slurries.")
-
+            with tab1:
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Design Flow", f"{Q_design*3600:.2f} m³/h", f"{Q_m3s*3600:.2f} m³/h actual")
+                    st.metric("Total Head", f"{total_head_design:.2f} m", f"+{safety_margin_head*100:.0f}% margin")
+                    st.metric("Velocity", f"{V:.2f} m/s", 
+                             "⚠️ High" if V > 3 else ("⚠️ Low" if V < 0.5 else "✅ OK"))
+                with col2:
+                    st.metric("Shaft Power", f"{shaft_kW:.2f} kW")
+                    st.metric("Motor Rating", f"{motor_rated_kW:.2f} kW", f"SF: {service_factor}")
+                    st.metric("Efficiency", f"{eff_op*100:.1f}%", f"BEP: {eff_bep*100:.1f}%")
+                with col3:
+                    st.metric("NPSHa", f"{NPSHa:.2f} m")
+                    if NPSHr_vendor > 0:
+                        st.metric("NPSH Margin", f"{NPSH_margin:.2f} m", npsh_warning)
+                    st.metric("Reynolds #", f"{Re:.0f}", 
+                             "Laminar" if Re < 2300 else "Turbulent")
 
                 st.markdown("---")
+                # Detailed results table
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.subheader("Hydraulic Parameters")
+                    hydraulic_data = pd.DataFrame({
+                        'Parameter': ['Static Head', 'Friction Loss', 'Minor Losses', 'Total Head', 
+                                     'Design Head', 'Friction Factor', 'Pipe Diameter'],
+                        'Value': [f"{static_head:.2f} m", f"{hf:.2f} m", f"{hm:.2f} m", 
+                                 f"{total_head:.2f} m", f"{total_head_design:.2f} m", 
+                                 f"{f:.4f}", f"{D_inner:.1f} mm"]
+                    })
+                    st.dataframe(hydraulic_data, use_container_width=True, hide_index=True)
+                with col_b:
+                    st.subheader("Pump Characteristics")
+                    pump_data = pd.DataFrame({
+                        'Parameter': ['Specific Speed (Ns)', 'Suction Specific Speed', 'Cavitation Index (σ)', 
+                                     'BEP Flow', 'Operating Flow', 'Deviation from BEP'],
+                        'Value': [f"{Ns:.0f}" if not np.isnan(Ns) else "N/A",
+                                 f"{Nss:.0f}" if not np.isnan(Nss) else "N/A",
+                                 f"{sigma:.3f}" if not np.isnan(sigma) else "N/A",
+                                 f"{Q_bep*3600:.2f} m³/h", f"{Q_op*3600:.2f} m³/h",
+                                 f"{pct_from_bep:.1f}%"]
+                    })
+                    st.dataframe(pump_data, use_container_width=True, hide_index=True)
+
+                # Recommendations
+                st.markdown("---")
+                st.subheader("🎯 Recommendations")
+                rec_col1, rec_col2 = st.columns(2)
+                with rec_col2:
+                    # Show a concise Process Parameters table in the Results summary
+                    st.subheader("Process Parameter")
+                    try:
+                        proc_params = {
+                            'Design Flow (m³/h)': f"{Q_design * 3600:.2f}",
+                            'Operating Flow (m³/h)': f"{Q_op * 3600:.2f}",
+                            'BEP Flow (m³/h)': f"{Q_bep * 3600:.2f}" if 'Q_bep' in locals() and not np.isnan(Q_bep) else 'N/A',
+                            'Design Head (m)': f"{total_head_design:.2f}",
+                            'Static Head (m)': f"{static_head:.2f}",
+                            'Shaft Power (kW)': f"{shaft_kW:.2f}" if 'shaft_kW' in locals() else 'N/A',
+                            'Electrical Power (kW)': f"{electrical_kW:.2f}" if 'electrical_kW' in locals() else 'N/A',
+                            'Motor Rating (kW)': f"{motor_rated_kW:.2f}" if 'motor_rated_kW' in locals() else 'N/A',
+                            'Operating Efficiency (%)': f"{eff_op*100:.1f}" if 'eff_op' in locals() and not np.isnan(eff_op) else 'N/A',
+                            'NPSHa (m)': f"{NPSHa:.2f}" if 'NPSHa' in locals() else 'N/A',
+                            'Vendor NPSHr (m)': f"{NPSHr_vendor:.2f}" if 'NPSHr_vendor' in locals() and NPSHr_vendor > 0 else 'N/A',
+                            'NPSH Margin (m)': f"{NPSH_margin:.2f}" if 'NPSH_margin' in locals() else 'N/A',
+                            'Velocity (m/s)': f"{V:.3f}" if 'V' in locals() else 'N/A',
+                            'Reynolds #': f"{Re:.0f}" if 'Re' in locals() else 'N/A',
+                            'Pipe ID (mm)': f"{D_inner:.1f}" if 'D_inner' in locals() else 'N/A',
+                            'Pipe length (m)': f"{L_pipe:.2f}" if 'L_pipe' in locals() else 'N/A',
+                            'Roughness (mm)': f"{eps_mm:.4f}" if 'eps_mm' in locals() else 'N/A',
+                            'Fittings K (total)': f"{K_fittings:.2f}" if 'K_fittings' in locals() else 'N/A',
+                            'Fluid': f"{material_type}",
+                            'Temperature (°C)': f"{T:.1f}" if 'T' in locals() else 'N/A',
+                            'Density (kg/m³)': f"{density:.1f}" if 'density' in locals() else 'N/A',
+                            'Viscosity (cP)': f"{mu_cP:.3f}" if 'mu_cP' in locals() else 'N/A',
+                            'Particle size (mm)': (f"{particle_size:.3f}" if 'particle_size' in locals() and particle_size else 'N/A'),
+                            'Pump arrangement': f"{pump_config}",
+                            'Number of pumps': f"{n_pumps}",
+                            'Pump speed (RPM)': f"{pump_speed_rpm:.0f}",
+                        }
+
+                        df_proc = pd.DataFrame(list(proc_params.items()), columns=["Parameter", "Value"])
+                        st.dataframe(df_proc, use_container_width=True, hide_index=True)
+
+                    except Exception as _err:
+                        # Fallback: inform user but don't break the UI
+                        st.warning(f"Process parameters not available: {_err}")
+                    if pct_from_bep <= 10:
+                        st.success("✅ Excellent: Operating within 10% of BEP")
+                    elif pct_from_bep <= 20:
+                        st.warning("⚡ Acceptable: Consider 5-10% derating")
+                    else:
+                        st.error("⚠️ Poor: Far from BEP. Consider different size")
+                with rec_col2:
+                    if show_wear_analysis:
+                        st.write(f"**Relative Wear Rate:** {wear_rate:.1f}x baseline")
+                        st.write(f"**Est. Service Life:** {estimated_service_life:.0f} hours")
+                        if wear_rate > 5:
+                            st.warning("⚠️ High wear expected. Consider hardened materials.")
+                    st.write(f"**Vibration Risk:** :{vib_color}[{vibration_severity}]")
+                    st.write(f"**Pulsation Risk:** :{pulse_color}[{pulsation_risk}]")
+                    st.write(f"**Seal Life Est.:** {seal_life_hours:.0f} hours")
+
+
+            with tab2:
                 st.subheader("Performance Curves")
-                st.image(fig_png, use_column_width=True)
-                st.markdown(f"**Inference:** {inference_system}")
-                if pct_from_bep > 20:
-                     st.warning(f"Operating point is {pct_from_bep:.1f}% away from BEP. This can lead to reduced efficiency, increased wear, and potential reliability issues.")
+                # Main pump curve
+                fig1, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
-                st.markdown("---")
-                st.subheader("Power & Efficiency")
-                st.image(fig2_png, use_column_width=True)
-                st.markdown(f"**Inference (power):** {inference_power}")
-                st.markdown(f"**Inference (efficiency):** {inference_eff}")
-                if pump_eff_user < 0.6:
-                    st.warning(f"Low estimated pump efficiency ({pump_eff_user*100:.1f}%) suggests potential for significant energy savings with a more efficient pump.")
+                # Head curves
+                ax1.plot(Q_points*3600, H_system, 'b-', linewidth=2, label='System Curve')
+                ax1.plot(Q_points*3600, H_pump, 'r-', linewidth=2, label='Pump Curve')
+                ax1.scatter([Q_bep*3600], [H_pump[bep_idx]], color='green', s=150, 
+                           marker='*', label='BEP', zorder=5, edgecolors='black')
+                ax1.scatter([Q_op*3600], [H_op], color='orange', s=150, 
+                           marker='D', label='Operating Point', zorder=5, edgecolors='black')
+                ax1.fill_between(Q_points*3600, H_system, alpha=0.2, color='blue')
+                ax1.axvline(Q_design*3600, color='gray', linestyle='--', alpha=0.5, label='Design Flow')
+                ax1.set_xlabel('Flow Rate (m³/h)', fontsize=11, fontweight='bold')
+                ax1.set_ylabel('Head (m)', fontsize=11, fontweight='bold')
+                ax1.set_title('Pump & System Curves', fontsize=12, fontweight='bold')
+                ax1.legend(loc='best', framealpha=0.9)
+                ax1.grid(True, alpha=0.3, linestyle=':')
 
-            with col2:
-                st.subheader("Vendor-ready Summary")
-                st.write(f"**Design flow:** {Q_design:.6f} m³/s ({Q_design*3600.0:.2f} m³/h)")
-                st.write(f"**Design total head:** {total_head_design:.2f} m")
-                st.write(f"**Required shaft power:** {shaft_kW:.2f} kW")
-                st.write(f"**Electrical power (est.):** {electrical_kW:.2f} kW")
-                st.write(f"**Motor rated (with service factor):** {motor_rated_kW:.2f} kW")
-                st.write(f"**NPSH available:** {NPSHa:.2f} m")
-                st.write(f"**Suggested impeller:** {suggest_impeller(material_type)}")
-                st.write(f"**Suggested pump type:** {pump_type}")
+                # Efficiency curve
+                ax2.plot(Q_points*3600, eff_curve*100, 'g-', linewidth=2, label='Efficiency')
+                ax2.axvline(Q_bep*3600, color='green', linestyle='--', alpha=0.7, label='BEP')
+                ax2.axvline(Q_op*3600, color='orange', linestyle='--', alpha=0.7, label='Operating Point')
+                ax2.fill_between(Q_points*3600, eff_curve*100, alpha=0.3, color='green')
+                ax2.set_xlabel('Flow Rate (m³/h)', fontsize=11, fontweight='bold')
+                ax2.set_ylabel('Efficiency (%)', fontsize=11, fontweight='bold')
+                ax2.set_title('Pump Efficiency Curve', fontsize=12, fontweight='bold')
+                ax2.legend(loc='best', framealpha=0.9)
+                ax2.grid(True, alpha=0.3, linestyle=':')
+                ax2.set_ylim([0, 100])
 
-                # Add fluid-specific notes and alerts
-                if material_type == 'Acids':
-                    st.warning("Handling acids requires careful material selection for pump and piping. Ensure compatibility with the specific acid and concentration.")
-                    st.info("Consider magnetic drive pumps or pumps with corrosion-resistant materials like PVDF, PTFE, or specialized alloys.")
-                elif material_type == 'Slurry':
-                    st.warning("Pumping slurries can cause abrasive wear. Proper material selection and pump type are critical.")
-                    st.info("Consider slurry pumps with robust construction, wear-resistant materials (e.g., high-chrome), and open or recessed impellers.")
-                elif material_type == 'Seawater':
-                     st.warning("Seawater is corrosive. Material selection to resist corrosion and fouling is important.")
-                     st.info("Bronze or stainless steel pumps are often used for seawater, depending on the application and required lifespan.")
-                elif material_type == 'Food-grade':
-                    st.warning("Food-grade applications require sanitary design and specific materials.")
-                    st.info("Use pumps designed for sanitary applications with polished stainless steel surfaces and FDA-approved elastomers.")
-                elif material_type == 'Oil Transfer':
-                    st.info("Viscosity and temperature significantly impact oil transfer. Ensure viscosity is within the pump's operating range.")
-                elif material_type == 'Alkaline':
-                     st.warning("Handling alkaline solutions requires careful material selection for pump and piping. Ensure compatibility with the specific alkaline and concentration.")
-                     st.info("Consider stainless steel or other corrosion-resistant materials.")
-                elif material_type == 'More':
-                    st.info("For fluid types not listed, consult specific material compatibility charts and vendor recommendations.")
+                plt.tight_layout()
+                st.pyplot(fig1)
+                plt.close()
+
+                # Power curve
+                fig2, ax3 = plt.subplots(figsize=(10, 5))
+                ax3.plot(Q_points*3600, power_curve, 'purple', linewidth=2, label='Power Required')
+                ax3.axvline(Q_op*3600, color='orange', linestyle='--', alpha=0.7, label='Operating Point')
+                ax3.axhline(motor_rated_kW, color='red', linestyle=':', alpha=0.7, label='Motor Rating')
+                ax3.fill_between(Q_points*3600, power_curve, alpha=0.3, color='purple')
+                ax3.set_xlabel('Flow Rate (m³/h)', fontsize=11, fontweight='bold')
+                ax3.set_ylabel('Power (kW)', fontsize=11, fontweight='bold')
+                ax3.set_title('Power Consumption vs Flow', fontsize=12, fontweight='bold')
+                ax3.legend(loc='best', framealpha=0.9)
+                ax3.grid(True, alpha=0.3, linestyle=':')
+
+                plt.tight_layout()
+                st.pyplot(fig2)
+                plt.close()
 
 
-                st.markdown("---")
-                st.markdown("**Checklist for vendor**")
-                st.write("1. Provide pump curve (flow vs head) at quoted impeller size and speed.")
-                st.write("2. Provide NPSHr curve and recommended margin.")
-                st.write("3. Confirm motor frame, service factor, and starter type.")
-                st.write("4. Provide mechanical seals, bearing arrangement, materials of construction and documentation.")
-
-                if matched_pumps is not None:
-                    st.markdown("---")
-                    st.subheader("Matched catalog candidates")
-                    st.dataframe(matched_pumps[['name','flow_m3h','head_m','power_kW','speed_rpm','npshr_m','score']].head(10))
-
-                # Excel export
-                if st.button("Generate Excel Report", type="primary"):
-                    excel_bytes = create_excel_report_rotating(df_summary, inputs_echo, fig_png)
-                    if excel_bytes:
-                        st.download_button(
-                            "📥 Download Rotating Pump Report (xlsx)",
-                            data=excel_bytes,
-                            file_name=f"rotating_pump_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            with tab3:
+                st.subheader("⚙️ Advanced Analysis")
+                if show_affinity:
+                    st.markdown("#### Affinity Laws Analysis")
+                    st.write("See how pump performance changes with speed variation:")
+                    speed_variations = np.array([0.7, 0.8, 0.9, 1.0, 1.1, 1.2])
+                    affinity_results = []
+                    for speed_ratio in speed_variations:
+                        Q_new, H_new, P_ratio = calculate_affinity_laws(
+                            Q_design, total_head_design, pump_speed_rpm, pump_speed_rpm * speed_ratio
                         )
+                        affinity_results.append({
+                            'Speed (RPM)': pump_speed_rpm * speed_ratio,
+                            'Speed %': speed_ratio * 100,
+                            'Flow (m³/h)': Q_new * 3600,
+                            'Head (m)': H_new,
+                            'Power Ratio': P_ratio
+                        })
+
+                    df_affinity = pd.DataFrame(affinity_results)
+                    col_af1, col_af2 = st.columns(2)
+                    with col_af1:
+                        st.dataframe(df_affinity, use_container_width=True, hide_index=True)
+                    with col_af2:
+                        fig_aff, (ax_aff1, ax_aff2) = plt.subplots(2, 1, figsize=(8, 8))
+                        ax_aff1.plot(df_affinity['Speed %'], df_affinity['Flow (m³/h)'], 'bo-', linewidth=2)
+                        ax_aff1.axvline(100, color='red', linestyle='--', alpha=0.5, label='Current Speed')
+                        ax_aff1.set_xlabel('Speed (%)', fontweight='bold')
+                        ax_aff1.set_ylabel('Flow (m³/h)', fontweight='bold')
+                        ax_aff1.set_title('Flow vs Speed')
+                        ax_aff1.grid(True, alpha=0.3)
+                        ax_aff1.legend()
+
+                        ax_aff2.plot(df_affinity['Speed %'], df_affinity['Head (m)'], 'ro-', linewidth=2)
+                        ax_aff2.axvline(100, color='red', linestyle='--', alpha=0.5, label='Current Speed')
+                        ax_aff2.set_xlabel('Speed (%)', fontweight='bold')
+                        ax_aff2.set_ylabel('Head (m)', fontweight='bold')
+                        ax_aff2.set_title('Head vs Speed')
+                        ax_aff2.grid(True, alpha=0.3)
+                        ax_aff2.legend()
+
+                        plt.tight_layout()
+                        st.pyplot(fig_aff)
+                        plt.close()
+
+                # NPSH Analysis
+                st.markdown("---")
+                st.markdown("#### NPSH Analysis")
+                col_npsh1, col_npsh2 = st.columns(2)
+                with col_npsh1:
+                    # NPSH margin chart
+                    flow_range = np.linspace(0.5, 1.5, 20)
+                    NPSHa_curve = np.ones_like(flow_range) * NPSHa
+                    if NPSHr_vendor > 0:
+                        # Estimate NPSHr increases with flow
+                        NPSHr_curve = NPSHr_vendor * (flow_range ** 1.5)
+                    else:
+                        NPSHr_curve = 3.0 * (flow_range ** 1.5)  # Typical curve
+
+                    fig_npsh, ax_npsh = plt.subplots(figsize=(8, 5))
+                    ax_npsh.plot(flow_range * Q_design * 3600, NPSHa_curve, 'b-', linewidth=2, label='NPSHa')
+                    ax_npsh.plot(flow_range * Q_design * 3600, NPSHr_curve, 'r-', linewidth=2, label='NPSHr (estimated)')
+                    ax_npsh.fill_between(flow_range * Q_design * 3600, NPSHr_curve, NPSHa_curve, 
+                                        where=(NPSHa_curve > NPSHr_curve), alpha=0.3, color='green', label='Safe Zone')
+                    ax_npsh.fill_between(flow_range * Q_design * 3600, NPSHr_curve, NPSHa_curve, 
+                                        where=(NPSHa_curve <= NPSHr_curve), alpha=0.3, color='red', label='Cavitation Risk')
+                    ax_npsh.axvline(Q_op * 3600, color='orange', linestyle='--', label='Operating Point')
+                    ax_npsh.set_xlabel('Flow (m³/h)', fontweight='bold')
+                    ax_npsh.set_ylabel('NPSH (m)', fontweight='bold')
+                    ax_npsh.set_title('NPSH Available vs Required', fontweight='bold')
+                    ax_npsh.legend(loc='best')
+                    ax_npsh.grid(True, alpha=0.3)
+
+                    st.pyplot(fig_npsh)
+                    plt.close()
+                with col_npsh2:
+                    st.write("**NPSH Analysis Summary:**")
+                    st.write(f"- NPSHa: {NPSHa:.2f} m")
+                    if NPSHr_vendor > 0:
+                        st.write(f"- NPSHr (vendor): {NPSHr_vendor:.2f} m")
+                        st.write(f"- Margin: {NPSH_margin:.2f} m")
+                        st.write(f"- Safety Factor: {NPSHa/NPSHr_vendor:.2f}x")
+                    st.write(f"- Cavitation Index: {sigma:.3f}" if not np.isnan(sigma) else "N/A")
+
+                    st.markdown("**Recommendations:**")
+                    if NPSHa < 2:
+                        st.error("⚠️ Very low NPSHa. Consider:")
+                        st.write("  - Lowering pump installation")
+                        st.write("  - Reducing suction pipe losses")
+                        st.write("  - Increasing suction pipe diameter")
+                    elif NPSHr_vendor > 0 and NPSH_margin < 1:
+                        st.warning("⚡ Marginal NPSH. Monitor for cavitation.")
+                    else:
+                        st.success("✅ Adequate NPSH margin")
+
+
+                # Pipe sizing optimization
+                st.markdown("---")
+                st.markdown("#### 🔧 Pipe Sizing Optimization")
+                # Test different pipe sizes
+                test_diameters = np.array([50, 75, 100, 125, 150, 200, 250, 300])  # mm
+                head_losses = []
+                velocities = []
+                pipe_costs = []
+                for d_test in test_diameters:
+                    d_m = d_test / 1000.0
+                    v_test = velocity_from_flow(Q_design, d_m)
+                    re_test = reynolds(density, v_test, d_m, mu)
+                    f_test = colebrook_f(re_test, d_m, eps_mm/1000.0)
+                    hf_test = darcy_head_loss(f_test, L_pipe, d_m, v_test)
+                    velocities.append(v_test)
+                    head_losses.append(hf_test)
+                    pipe_costs.append(d_test * 0.5 * L_pipe)  # Simplified cost model
+
+                fig_pipe, (ax_pipe1, ax_pipe2) = plt.subplots(1, 2, figsize=(14, 5))
+
+                # Head loss vs diameter
+                ax_pipe1.plot(test_diameters, head_losses, 'b-', linewidth=2, marker='o')
+                ax_pipe1.axvline(D_inner, color='r', linestyle='--', label=f'Current: {D_inner}mm')
+                ax_pipe1.axhline(hf, color='r', linestyle=':', alpha=0.5)
+                ax_pipe1.set_xlabel('Pipe Diameter (mm)', fontweight='bold')
+                ax_pipe1.set_ylabel('Head Loss (m)', fontweight='bold')
+                ax_pipe1.set_title('Head Loss vs Pipe Diameter', fontweight='bold')
+                ax_pipe1.legend()
+                ax_pipe1.grid(True, alpha=0.3)
+
+                # Velocity vs diameter with recommended zones
+                ax_pipe2.plot(test_diameters, velocities, 'g-', linewidth=2, marker='s')
+                ax_pipe2.axvline(D_inner, color='r', linestyle='--', label=f'Current: {D_inner}mm')
+                ax_pipe2.axhspan(0.5, 3.0, alpha=0.2, color='green', label='Recommended Range')
+                ax_pipe2.axhspan(3.0, 5.0, alpha=0.2, color='yellow', label='Acceptable')
+                ax_pipe2.axhspan(5.0, 10.0, alpha=0.2, color='red', label='Too High')
+                ax_pipe2.set_xlabel('Pipe Diameter (mm)', fontweight='bold')
+                ax_pipe2.set_ylabel('Velocity (m/s)', fontweight='bold')
+                ax_pipe2.set_title('Velocity vs Pipe Diameter', fontweight='bold')
+                ax_pipe2.legend(loc='best')
+                ax_pipe2.grid(True, alpha=0.3)
+
+                plt.tight_layout()
+                st.pyplot(fig_pipe)
+                plt.close()
+
+                # Find optimal diameter
+                optimal_idx = np.argmin(np.abs(np.array(velocities) - 2.0))  # Target 2 m/s
+                optimal_diameter = test_diameters[optimal_idx]
+                col_opt1, col_opt2 = st.columns(2)
+                with col_opt1:
+                    st.info(f"**Recommended Diameter:** {optimal_diameter} mm")
+                    st.write(f"- Current: {D_inner} mm ({V:.2f} m/s)")
+                    st.write(f"- Optimal: {optimal_diameter} mm ({velocities[optimal_idx]:.2f} m/s)")
+                    st.write(f"- Head loss reduction: {hf - head_losses[optimal_idx]:.2f} m")
+                with col_opt2:
+                    if optimal_diameter != D_inner:
+                        power_saving = density * 9.81 * Q_design * (hf - head_losses[optimal_idx]) / pump_eff / 1000.0
+                        if show_energy_cost:
+                            # --- CHANGED COST CALCULATION ---
+                            annual_savings = power_saving * operating_hours * electricity_cost
+                            st.success(f"**Potential Savings:**")
+                            st.write(f"- Power: {power_saving:.2f} kW")
+                            st.write(f"- Annual: ₹{annual_savings:,.2f}") # Changed currency
+                        else:
+                            st.write(f"**Power Savings:** {power_saving:.2f} kW")
+                    else:
+                        st.success("✅ Current diameter is optimal")
+
+                # Reliability and Maintenance Prediction
+                st.markdown("---")
+                st.markdown("#### 🔧 Reliability & Maintenance Analysis")
+                col_rel1, col_rel2 = st.columns(2)
+                with col_rel1:
+                    st.write("**Component Life Estimates:**")
+                    # Bearing life estimation (simplified L10 life)
+                    bearing_life_hours = 40000 / ((pump_speed_rpm/1450)**3) * (0.8 if material_type == 'Slurry' else 1.0)
+                    st.write(f"- Bearings: {bearing_life_hours:.0f} hours")
+                    st.write(f"- Mechanical Seal: {seal_life_hours:.0f} hours")
+                    st.write(f"- Impeller (wear): {estimated_service_life:.0f} hours" if show_wear_analysis else "")
+                    # Calculate MTBF
+                    component_lives = [bearing_life_hours, seal_life_hours]
+                    if show_wear_analysis:
+                        component_lives.append(estimated_service_life)
+                    mtbf = min(component_lives) * 0.8  # Conservative estimate
+                    st.write(f"**Est. MTBF:** {mtbf:.0f} hours")
+                with col_rel2:
+                    st.write("**Maintenance Schedule:**")
+                    inspection_interval = min(2000, mtbf * 0.1)
+                    minor_service_interval = min(4000, mtbf * 0.2)
+                    major_overhaul_interval = min(8000, mtbf * 0.4)
+                    st.write(f"- Inspection: Every {inspection_interval:.0f} hours")
+                    st.write(f"- Minor service: Every {minor_service_interval:.0f} hours")
+                    st.write(f"- Major overhaul: Every {major_overhaul_interval:.0f} hours")
+                    if operating_hours > 0:
+                        annual_inspections = operating_hours / inspection_interval
+                        st.write(f"**Annual requirements:**")
+                        st.write(f"- {annual_inspections:.1f} inspections/year")
+
+                # Failure mode analysis
+                st.markdown("---")
+                st.markdown("#### ⚠️ Critical Failure Modes")
+                failure_modes = []
+                if NPSHa < NPSHr_vendor + 1 and NPSHr_vendor > 0:
+                    failure_modes.append(("Cavitation damage", "High", "Monitor NPSH, check for noise/vibration"))
+                if pct_from_bep > 25:
+                    failure_modes.append(("Recirculation damage", "Medium", "Resize pump or use VFD control"))
+                if V > 4:
+                    failure_modes.append(("Erosion", "Medium", "Consider larger pipe or flow restriction"))
+                if material_type == 'Slurry' and V < 0.8:
+                    failure_modes.append(("Settling/plugging", "High", "Increase velocity or use agitation"))
+                if Re < 2300 and mu_cP > 100:
+                    failure_modes.append(("Performance degradation", "Medium", "Consider PD pump or heating"))
+                if seal_life_hours < 8000:
+                    failure_modes.append(("Seal failure", "High", "Upgrade seal type or improve cooling"))
+
+                if failure_modes:
+                    failure_df = pd.DataFrame(failure_modes, columns=['Failure Mode', 'Risk', 'Mitigation'])
+                    st.dataframe(failure_df, use_container_width=True, hide_index=True)
+                else:
+                    st.success("✅ No critical failure modes identified")
+
+
+            with tab4:
+                if show_energy_cost:
+                    st.subheader("💰 Life Cycle Cost Analysis")
+                    # Annual energy consumption
+                    annual_energy_kWh = electrical_kW * operating_hours
+                    # --- CHANGED COST CALCULATION ---
+                    annual_cost = annual_energy_kWh * electricity_cost
+                    col_cost1, col_cost2, col_cost3 = st.columns(3)
+                    with col_cost1:
+                        st.metric("Annual Energy", f"{annual_energy_kWh:,.0f} kWh")
+                        # --- CHANGED CURRENCY ---
+                        st.metric("Annual Cost", f"₹{annual_cost:,.2f}") # Changed currency
+                    with col_cost2:
+                        # Efficiency impact
+                        if eff_op < 0.7:
+                            # --- CHANGED CURRENCY ---
+                            potential_savings = annual_cost * (0.75 - eff_op) / eff_op
+                            st.metric("Potential Savings", f"₹{potential_savings:,.2f}/yr", 
+                                     "with 75% efficient pump")
+                        else:
+                            st.metric("Efficiency Status", "Good", "✅")
+                    with col_cost3:
+                        # 10-year projection
+                        # --- CHANGED CURRENCY ---
+                        ten_year_cost = annual_cost * 10
+                        st.metric("10-Year Energy Cost", f"₹{ten_year_cost:,.2f}") # Changed currency
+
+                    st.markdown("---")
+                    # Cost breakdown over time
+                    years = np.arange(1, 11)
+                    cumulative_cost = years * annual_cost
+                    # Compare with higher efficiency pump
+                    high_eff = 0.80
+                    if eff_op < high_eff:
+                        high_eff_power = electrical_kW * eff_op / high_eff
+                        high_eff_cost = high_eff_power * operating_hours * electricity_cost * years
+                        savings = cumulative_cost - high_eff_cost
+
+                    fig_cost, (ax_cost1, ax_cost2) = plt.subplots(1, 2, figsize=(14, 5))
+
+                    # Cumulative cost
+                    ax_cost1.plot(years, cumulative_cost/1000, 'b-', linewidth=2, marker='o', label='Current Pump')
+                    if eff_op < high_eff:
+                        ax_cost1.plot(years, high_eff_cost/1000, 'g--', linewidth=2, marker='s', label='80% Efficient Pump')
+                        ax_cost1.fill_between(years, high_eff_cost/1000, cumulative_cost/1000, alpha=0.3, color='green')
+                    ax_cost1.set_xlabel('Years', fontweight='bold')
+                    ax_cost1.set_ylabel('Cumulative Cost (₹1000s)', fontweight='bold') # Changed currency
+                    ax_cost1.set_title('10-Year Energy Cost Projection', fontweight='bold')
+                    ax_cost1.legend()
+                    ax_cost1.grid(True, alpha=0.3)
+
+                    # Monthly breakdown
+                    months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+                    monthly_cost = np.ones(12) * (annual_cost / 12)
+                    ax_cost2.bar(months, monthly_cost, color='steelblue', alpha=0.7)
+                    ax_cost2.set_xlabel('Month', fontweight='bold')
+                    ax_cost2.set_ylabel('Cost (₹)', fontweight='bold') # Changed currency
+                    ax_cost2.set_title('Estimated Monthly Energy Cost', fontweight='bold')
+                    ax_cost2.grid(True, alpha=0.3, axis='y')
+                    plt.setp(ax_cost2.xaxis.get_majorticklabels(), rotation=45)
+
+                    plt.tight_layout()
+                    st.pyplot(fig_cost)
+                    plt.close()
+
+                    # Payback analysis
+                    if eff_op < high_eff:
+                        st.markdown("---")
+                        st.markdown("#### 💡 Efficiency Upgrade Analysis")
+                        # --- CHANGED COST CALCULATION ---
+                        upgrade_cost_estimate = motor_rated_kW * 200  # ₹200/kW rough estimate # Changed currency
+                        annual_savings = savings[0]
+                        payback_years = upgrade_cost_estimate / annual_savings if annual_savings > 0 else np.inf
+                        col_pay1, col_pay2, col_pay3 = st.columns(3)
+                        with col_pay1:
+                            # --- CHANGED CURRENCY ---
+                            st.metric("Estimated Upgrade Cost", f"₹{upgrade_cost_estimate:,.0f}") # Changed currency
+                        with col_pay2:
+                            # --- CHANGED CURRENCY ---
+                            st.metric("Annual Savings", f"₹{annual_savings:,.2f}") # Changed currency
+                        with col_pay3:
+                            if payback_years < 5:
+                                st.metric("Payback Period", f"{payback_years:.1f} years", "✅ Good ROI")
+                            elif payback_years < 10:
+                                st.metric("Payback Period", f"{payback_years:.1f} years", "⚡ Marginal")
+                            else:
+                                st.metric("Payback Period", f"{payback_years:.1f} years", "❌ Poor ROI")
+                else:
+                    st.info("Enable 'Calculate energy costs' in the form to see this analysis")
+
+            # Export functionality
+            st.markdown("---")
+            st.subheader("📥 Export Results")
+            col_exp1, col_exp2 = st.columns(2)
+            with col_exp1:
+                if st.button("📄 Generate PDF Report", type="secondary"):
+                    # Build the same results_data used for Excel export
+                    results_data_pdf = {
+                        'Design Flow (m3/h)': Q_design * 3600 if 'Q_design' in locals() else 'N/A',
+                        'Design Head (m)': total_head_design if 'total_head_design' in locals() else 'N/A',
+                        'Velocity (m/s)': V if 'V' in locals() else 'N/A',
+                        'Shaft Power (kW)': shaft_kW if 'shaft_kW' in locals() else 'N/A',
+                        'Motor Rating (kW)': motor_rated_kW if 'motor_rated_kW' in locals() else 'N/A',
+                        'Efficiency (%)': eff_op * 100 if 'eff_op' in locals() and not np.isnan(eff_op) else 'N/A',
+                        'NPSHa (m)': NPSHa if 'NPSHa' in locals() else 'N/A',
+                        'NPSH Margin (m)': NPSH_margin if 'NPSH_margin' in locals() else 'N/A',
+                        'Reynolds Number': Re if 'Re' in locals() else 'N/A',
+                        'Specific Speed (Ns)': Ns if 'Ns' in locals() else 'N/A',
+                        'Suction Specific Speed (Nss)': Nss if 'Nss' in locals() else 'N/A',
+                        'Cavitation Index (σ)': sigma if 'sigma' in locals() else 'N/A',
+                        'BEP Flow (m3/h)': Q_bep * 3600 if 'Q_bep' in locals() and not np.isnan(Q_bep) else 'N/A',
+                        'Operating Flow (m3/h)': Q_op * 3600 if 'Q_op' in locals() else 'N/A',
+                        'Deviation from BEP (%)': pct_from_bep if 'pct_from_bep' in locals() else 'N/A',
+                        'Relative Wear Rate': wear_rate if 'wear_rate' in locals() else 'N/A',
+                        'Est. Service Life (hrs)': estimated_service_life if 'estimated_service_life' in locals() else 'N/A',
+                        'Vibration Risk': vibration_severity if 'vibration_severity' in locals() else 'N/A',
+                        'Pulsation Risk': pulsation_risk if 'pulsation_risk' in locals() else 'N/A',
+                        'Seal Life Est. (hrs)': seal_life_hours if 'seal_life_hours' in locals() else 'N/A',
+                        'Annual Energy (kWh)': annual_energy_kWh if 'annual_energy_kWh' in locals() else 'N/A',
+                        'Annual Cost (₹)': annual_cost if 'annual_cost' in locals() else 'N/A',
+                        '10-Year Energy Cost (₹)': ten_year_cost if 'ten_year_cost' in locals() else 'N/A',
+                        'Q_points': Q_points if 'Q_points' in locals() else [],
+                        'H_pump': H_pump if 'H_pump' in locals() else [],
+                        'eff_curve': eff_curve if 'eff_curve' in locals() else [],
+                        'power_curve': power_curve if 'power_curve' in locals() else [],
+                        'Process Parameters': proc_params_export if 'proc_params_export' in locals() else {}
+                    }
+                    pdf_bytes = create_pdf_report_rotating(results_data_pdf)
+                    st.download_button(
+                        label="Download PDF Report",
+                        data=pdf_bytes,
+                        file_name=f"pump_sizing_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                        mime="application/pdf"
+                    )
+
+
+
+
+
 
         except Exception as e:
-            st.error(f"Calculation error: {e}")
+            st.error(f"❌ Calculation error: {e}")
             st.error("Please check your input values and try again.")
 
 # ------------------ Vacuum Pump Calculator Page ------------------
 elif page == "Vacuum Pump Calculator":
-    st.header("Vacuum Pump Sizing & Selection")
-
+    st.header("🌀 Vacuum Pump Sizing & Selection")
     with st.form(key='vacuum'):
-        st.subheader("Chamber & Gas Load")
-        chamber_volume_l = st.number_input("Chamber Volume (L)", value=100.0, min_value=0.1)
-        leak_rate_mbarL_s = st.number_input("Estimated leak/outgassing (mbar·L/s)", value=0.1, min_value=0.0, format="%.6g")
-        desired_pressure_mbar = st.number_input("Desired operating pressure (mbar)", value=1e-3, format="%.6g", min_value=1e-12)
-        desired_pressure_unit = st.selectbox("Pressure unit", ['mbar', 'Pa'], index=0)
-
-        if desired_pressure_unit == 'Pa':
-            desired_pressure_mbar = desired_pressure_mbar / 100.0
-
-        st.subheader("Foreline / Conductance (optional)")
-        foreline_id_mm = st.number_input("Foreline inner diameter (mm)", value=25.0, min_value=1.0)
-        foreline_length_m = st.number_input("Foreline length (m)", value=1.0, min_value=0.01)
-        gas_molecular_mass = st.number_input("Representative gas molecular mass (g/mol)", value=28.97, min_value=1.0)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Chamber & Gas Load")
+            chamber_volume_l = st.number_input("Chamber Volume (L)", value=100.0, min_value=0.1)
+            leak_rate_mbarL_s = st.number_input("Leak/outgassing (mbar·L/s)", value=0.1, min_value=0.0, format="%.6g")
+            desired_pressure_mbar = st.number_input("Desired pressure (mbar)", value=1e-3, format="%.6g", min_value=1e-12)
+            desired_pressure_unit = st.selectbox("Pressure unit", ['mbar', 'Pa', 'Torr'], index=0)
+            if desired_pressure_unit == 'Pa':
+                desired_pressure_mbar = desired_pressure_mbar / 100.0
+            elif desired_pressure_unit == 'Torr':
+                desired_pressure_mbar = desired_pressure_mbar * 1.33322
+        with col2:
+            st.subheader("Foreline / Conductance")
+            foreline_id_mm = st.number_input("Foreline ID (mm)", value=25.0, min_value=1.0)
+            foreline_length_m = st.number_input("Foreline length (m)", value=1.0, min_value=0.01)
+            gas_molecular_mass = st.number_input("Gas molecular mass (g/mol)", value=28.97, min_value=1.0)
+            temperature_K = st.number_input("Gas temperature (K)", value=293.0, min_value=1.0)
 
         st.subheader("Pump/Process Constraints")
-        available_pumping_speed_Ls = st.number_input("Available pumping speed (L/s) if known (0 to auto-calc)", value=0.0, min_value=0.0)
-        suggest_backing = st.checkbox("Suggest backing pump for high vacuum (turbo+backing)", value=True)
-        # Removed vacuum_pump_eff and vacuum_motor_eff inputs
-
-
-        submitted_vac = st.form_submit_button("Calculate Vacuum Requirements")
+        available_pumping_speed_Ls = st.number_input("Available pumping speed (L/s) [0=auto]", value=0.0, min_value=0.0)
+        suggest_backing = st.checkbox("Suggest backing pump", value=True)
+        process_type = st.selectbox("Process Type", ['General Vacuum', 'High Vacuum Research', 
+                                                      'Coating/Deposition', 'Freeze Drying', 
+                                                      'Semiconductor', 'Analytical Instrument'])
+        submitted_vac = st.form_submit_button("🚀 Calculate", type="primary")
 
     if submitted_vac:
         try:
             # Convert units
             chamber_volume_m3 = chamber_volume_l / 1000.0
-            Q_pa_m3_s = leak_rate_mbarL_s * 0.1  # 1 mbar·L/s = 0.1 Pa·m3/s
+            Q_pa_m3_s = leak_rate_mbarL_s * 0.1
             P_target_Pa = desired_pressure_mbar * 100.0
 
-            # Required pumping speed S = Q / P (in m3/s)
+            # Required pumping speed
             if P_target_Pa > 0:
                 S_required_m3_s = Q_pa_m3_s / P_target_Pa
             else:
                 S_required_m3_s = np.inf
             S_required_Ls = S_required_m3_s * 1000.0
 
-            # Conductance estimation for tube (molecular flow approx)
+            # Conductance (molecular flow)
             d_cm = foreline_id_mm / 10.0
             if foreline_length_m > 0:
-                C_molecular_Ls = 12.1 * d_cm**3 / foreline_length_m
+                C_molecular_Ls = 12.1 * d_cm**3 / foreline_length_m * np.sqrt(293.0/temperature_K) * np.sqrt(28.97/gas_molecular_mass)
             else:
                 C_molecular_Ls = np.inf
 
-            # Effective pumping speed calculation
+            # Effective speed
             if not np.isinf(C_molecular_Ls) and not np.isnan(S_required_Ls) and S_required_Ls > 0:
                 S_effective_Ls = (S_required_Ls * C_molecular_Ls) / (S_required_Ls + C_molecular_Ls)
             else:
                 S_effective_Ls = S_required_Ls
 
-            # If user provided available pumping speed, compute steady-state pressure
-            if available_pumping_speed_Ls > 0:
-                S_user_m3_s = available_pumping_speed_Ls / 1000.0
-                P_steady_Pa = Q_pa_m3_s / S_user_m3_s if S_user_m3_s > 0 else np.inf
-            else:
-                P_steady_Pa = P_target_Pa
-
-            # Pump-down time estimate (assuming S constant, ideal gas)
+            # Pump-down time
             p0_mbar = 1000.0
             p0_Pa = p0_mbar * 100.0
             if S_required_m3_s > 0 and not np.isinf(S_required_m3_s):
@@ -619,195 +1201,570 @@ elif page == "Vacuum Pump Calculator":
                 tau_sec = np.inf
                 t_to_target_sec = np.inf
 
-            # Removed vacuum pump power calculation
-
-
-            # Suggest pump types by pressure range and throughput
+            # Pump type suggestions
             pump_type_suggestion = []
             if desired_pressure_mbar >= 100:
                 pump_type_suggestion.append('Rotary Lobe / Dry Screw (vacuum blower)')
             if 1 <= desired_pressure_mbar < 100:
-                pump_type_suggestion.append('Rotary Vane or Dry Scroll (roughing pump)')
+                pump_type_suggestion.append('Rotary Vane or Dry Scroll (roughing)')
             if desired_pressure_mbar < 1e-3:
-                pump_type_suggestion.append('Turbomolecular pump (requires backing pump)')
+                pump_type_suggestion.append('Turbomolecular pump')
             elif desired_pressure_mbar < 1e-1:
-                pump_type_suggestion.append('Roots (booster) + backing pump or high-capacity rotary vane')
+                pump_type_suggestion.append('Roots booster + backing')
 
+            # Display results
+            st.success("✅ Vacuum Analysis Complete")
+            # Tabs
+            tab1, tab2, tab3 = st.tabs(["📊 Results", "📈 Performance", "🔧 Optimization"])
 
-            # Backing pump suggestion
-            backing_suggestion = ''
-            if suggest_backing:
-                if any('Turbomolecular' in s for s in pump_type_suggestion):
-                    backing_suggestion = 'Use dry rotary vane or dry screw pump as backing; choose backing speed >= 0.5x turbo foreline conductance-adjusted speed.'
-                elif any('Roots' in s for s in pump_type_suggestion):
-                    backing_suggestion = 'Use large capacity rotary vane or screw backing pump sized for roots pumping speed and pressure range.'
-                else:
-                    backing_suggestion = 'No special backing pump needed for this pressure range.'
+            with tab1:
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Required Speed", f"{S_required_Ls:.1f} L/s")
+                    st.metric("Effective Speed", f"{S_effective_Ls:.1f} L/s")
+                with col2:
+                    st.metric("Conductance", f"{C_molecular_Ls:.1f} L/s")
+                    st.metric("Time Constant", f"{tau_sec:.1f} s")
+                with col3:
+                    st.metric("Pumpdown Time", f"{t_to_target_sec/60:.1f} min")
+                    st.metric("Target Pressure", f"{desired_pressure_mbar:.2e} mbar")
 
+                st.markdown("---")
+                st.subheader("Recommended Pump Types")
+                for pump_type in pump_type_suggestion:
+                    st.write(f"✓ {pump_type}")
 
-            # Create results display
-            st.subheader("Vacuum Sizing Results")
+            with tab2:
+                # Pumpdown curve
+                time_points = np.linspace(0, min(t_to_target_sec * 1.5, 3600), 100)
+                pressure_curve = p0_Pa * np.exp(-time_points / tau_sec) if not np.isinf(tau_sec) else np.ones_like(time_points) * p0_Pa
+                fig_vac, ax_vac = plt.subplots(figsize=(10, 6))
+                ax_vac.semilogy(time_points/60, pressure_curve/100, 'b-', linewidth=2)
+                ax_vac.axhline(desired_pressure_mbar, color='r', linestyle='--', label='Target Pressure')
+                ax_vac.set_xlabel('Time (minutes)', fontweight='bold')
+                ax_vac.set_ylabel('Pressure (mbar)', fontweight='bold')
+                ax_vac.set_title('Pumpdown Curve', fontweight='bold')
+                ax_vac.grid(True, which='both', alpha=0.3)
+                ax_vac.legend()
+                st.pyplot(fig_vac)
+                plt.close()
 
-            # Create columns for better layout
-            col1, col2 = st.columns([2, 1])
+            with tab3:
+                st.subheader("System Optimization")
+                col_vac1, col_vac2 = st.columns(2)
+                with col_vac1:
+                    st.markdown("#### 📏 Diameter Optimization")
+                    # Diameter optimization
+                    diameters = np.linspace(10, 100, 50)
+                    conductances = 12.1 * (diameters/10)**3 / foreline_length_m
+                    # Calculate effective speeds
+                    S_effs = (S_required_Ls * conductances) / (S_required_Ls + conductances)
 
-            with col1:
-                # Results table
-                results_data = {
-                    'Parameter': [
-                        'Chamber volume (m³)',
-                        'Chamber volume (L)',
-                        'Leak/Outgassing (mbar·L/s)',
-                        'Leak/Outgassing (Pa·m³/s)',
-                        'Target pressure (mbar)',
-                        'Target pressure (Pa)',
-                        'Required pumping speed (L/s)',
-                        'Required pumping speed (m³/s)',
-                        'Molecular conductance (L/s)',
-                        'Effective pumping speed (L/s)',
-                        'Time constant τ (s)',
-                        'Pump-down time (min)'
-                        # Removed power results from table
-                    ],
-                    'Value': [
-                        f"{chamber_volume_m3:.4f}",
-                        f"{chamber_volume_l:.1f}",
-                        f"{leak_rate_mbarL_s:.4g}",
-                        f"{Q_pa_m3_s:.4g}",
-                        f"{desired_pressure_mbar:.4g}",
-                        f"{P_target_Pa:.4g}",
-                        f"{S_required_Ls:.2f}",
-                        f"{S_required_m3_s:.6f}",
-                        f"{C_molecular_Ls:.2f}" if not np.isinf(C_molecular_Ls) else "∞",
-                        f"{S_effective_Ls:.2f}" if not np.isnan(S_effective_Ls) else "N/A",
-                        f"{tau_sec:.1f}" if not np.isinf(tau_sec) else "∞",
-                        f"{t_to_target_sec/60.0:.1f}" if not np.isinf(t_to_target_sec) else "∞"
-                        # Removed power results from table
-                    ]
+                    fig_opt, ax_opt = plt.subplots(figsize=(8, 5))
+                    ax_opt.plot(diameters, conductances, 'g-', linewidth=2, label='Conductance')
+                    ax_opt.plot(diameters, S_effs, 'b--', linewidth=2, label='Effective Speed')
+                    ax_opt.axvline(foreline_id_mm, color='r', linestyle='--', label=f'Current: {foreline_id_mm}mm')
+                    ax_opt.set_xlabel('Foreline Diameter (mm)', fontweight='bold')
+                    ax_opt.set_ylabel('Speed (L/s)', fontweight='bold')
+                    ax_opt.set_title('Conductance & Effective Speed vs Diameter', fontweight='bold')
+                    ax_opt.grid(True, alpha=0.3)
+                    ax_opt.legend()
+                    st.pyplot(fig_opt)
+                    plt.close()
+
+                with col_vac2:
+                    st.markdown("#### ⚡ Speed vs Pressure")
+                    # Pumping speed vs pressure (typical turbopump curve)
+                    pressures = np.logspace(-4, 2, 50)  # mbar
+                    # Simplified curve: constant speed at low P, drops at high P
+                    speeds = np.where(pressures < 0.1, 
+                                     S_required_Ls, 
+                                     S_required_Ls * (0.1/pressures)**0.3)
+                    fig_sp, ax_sp = plt.subplots(figsize=(8, 5))
+                    ax_sp.semilogx(pressures, speeds, 'purple', linewidth=2)
+                    ax_sp.axvline(desired_pressure_mbar, color='r', linestyle='--', label='Target')
+                    ax_sp.set_xlabel('Pressure (mbar)', fontweight='bold')
+                    ax_sp.set_ylabel('Pumping Speed (L/s)', fontweight='bold')
+                    ax_sp.set_title('Estimated Speed vs Pressure', fontweight='bold')
+                    ax_sp.grid(True, alpha=0.3, which='both')
+                    ax_sp.legend()
+                    st.pyplot(fig_sp)
+                    plt.close()
+
+                # Gas load analysis
+                st.markdown("---")
+                st.markdown("#### 💨 Gas Load Analysis")
+                # Different gas load scenarios
+                scenarios = {
+                    'Current': leak_rate_mbarL_s,
+                    'Low leak': leak_rate_mbarL_s * 0.5,
+                    'High leak': leak_rate_mbarL_s * 2.0,
+                    'With purge': leak_rate_mbarL_s * 1.5,
                 }
+                scenario_results = []
+                for name, load in scenarios.items():
+                    S_req_scenario = (load * 0.1) / P_target_Pa * 1000 if P_target_Pa > 0 else np.inf
+                    if not np.isinf(C_molecular_Ls) and S_req_scenario > 0:
+                        S_eff_scenario = (S_req_scenario * C_molecular_Ls) / (S_req_scenario + C_molecular_Ls)
+                    else:
+                        S_eff_scenario = S_req_scenario
+                    scenario_results.append({
+                        'Scenario': name,
+                        'Gas Load (mbar·L/s)': load,
+                        'Required Speed (L/s)': S_req_scenario if not np.isinf(S_req_scenario) else 999999,
+                        'Effective Speed (L/s)': S_eff_scenario if not np.isinf(S_eff_scenario) else 999999
+                    })
 
-                st.dataframe(pd.DataFrame(results_data), use_container_width=True)
+                df_scenarios = pd.DataFrame(scenario_results)
+                st.dataframe(df_scenarios, use_container_width=True, hide_index=True)
 
-                if available_pumping_speed_Ls > 0:
-                    st.info(f"**With available speed {available_pumping_speed_Ls:.1f} L/s:** Steady pressure = {P_steady_Pa/100.0:.4g} mbar")
+                # Vacuum system recommendations
+                st.markdown("---")
+                st.markdown("#### 🎯 System Recommendations")
+                rec_col1, rec_col2 = st.columns(2)
+                with rec_col1:
+                    st.write("**Pump Selection Guidance:**")
+                    if desired_pressure_mbar < 1e-5:
+                        st.write("- Turbo + Ion/Cryo pump combination")
+                        st.write("- Bake-out capability required")
+                        st.write("- Clean/dry gases only")
+                    elif desired_pressure_mbar < 1e-3:
+                        st.write("- Turbomolecular pump")
+                        st.write("- Dry backing pump (scroll/screw)")
+                        st.write("- Consider nitrogen purge")
+                    elif desired_pressure_mbar < 1:
+                        st.write("- Roots + rotary vane")
+                        st.write("- Or large dry pump")
+                    else:
+                        st.write("- Rotary vane or dry scroll")
+                        st.write("- Single stage adequate")
 
+                with rec_col2:
+                    st.write("**Process Considerations:**")
+                    if process_type == 'Coating/Deposition':
+                        st.write("- Clean pump (mag-lev turbo)")
+                        st.write("- Particle trap recommended")
+                        st.write("- Consider load-lock")
+                    elif process_type == 'Freeze Drying':
+                        st.write("- Condensable vapor capacity")
+                        st.write("- Cold trap essential")
+                        st.write("- Large throughput needed")
+                    elif process_type == 'Semiconductor':
+                        st.write("- Ultra-clean vacuum")
+                        st.write("- Corrosive gas handling")
+                        st.write("- In-line scrubbers")
+                    else:
+                        st.write("- General purpose pump suitable")
+                        st.write("- Standard maintenance intervals")
 
-            with col2:
-                st.subheader("Pump & Backing Suggestions")
-                st.write("**Pump types suitable for this application:**")
-                for s in pump_type_suggestion:
-                    st.write(f"• {s}")
+                # Ultimate pressure achievable
+                st.markdown("---")
+                col_ult1, col_ult2 = st.columns(2)
+                with col_ult1:
+                    st.info("**Ultimate Pressure Estimate**")
+                    # Base ultimate pressure for pump type
+                    if desired_pressure_mbar < 1e-3:
+                        base_ultimate = 1e-8  # Turbo
+                    elif desired_pressure_mbar < 1:
+                        base_ultimate = 1e-4  # Roots
+                    else:
+                        base_ultimate = 1e-2  # Rotary vane
+                    # Degrade based on gas load
+                    effective_ultimate = base_ultimate + (leak_rate_mbarL_s * 0.01)
+                    st.write(f"Pump ultimate: ~{base_ultimate:.2e} mbar")
+                    st.write(f"With gas load: ~{effective_ultimate:.2e} mbar")
+                    if effective_ultimate > desired_pressure_mbar:
+                        st.error("⚠️ May not reach target pressure with this gas load!")
+                    else:
+                        st.success("✅ Target pressure achievable")
+                with col_ult2:
+                    st.info("**Crossover Pressure**")
+                    if desired_pressure_mbar < 1e-1:
+                        crossover = 1e-2  # Turbo/Roots crossover
+                        st.write(f"Switch pump at: ~{crossover:.2e} mbar")
+                        st.write("Rough → High vacuum")
+                        if crossover > desired_pressure_mbar * 100:
+                            st.write("✅ Adequate margin")
+                        else:
+                            st.warning("⚡ Tight transition")
 
-                if backing_suggestion:
-                    st.write(f"**Backing pump:** {backing_suggestion}")
-
-
-            # Conductance guidance & plot
-            st.markdown("---")
-            st.subheader("Conductance Analysis")
-
-            # Plot conductance vs diameter for this length
-            diameters = np.linspace(5, 150, 50)
-            C_vs_d = 12.1 * (diameters/10.0)**3 / foreline_length_m if foreline_length_m > 0 else np.zeros_like(diameters)
-
-            fig_c, ax_c = plt.subplots(figsize=(10, 6))
-            ax_c.plot(diameters, C_vs_d, linewidth=2, color='blue')
-            ax_c.set_xlabel('Foreline diameter (mm)')
-            ax_c.set_ylabel('Molecular conductance (L/s)')
-            ax_c.set_title(f'Conductance vs Diameter (Length = {foreline_length_m:.1f} m)')
-            ax_c.grid(True, alpha=0.3)
-
-            # Annotate current diameter
-            current_C = 12.1 * (foreline_id_mm/10.0)**3 / foreline_length_m if foreline_length_m > 0 else 0
-            ax_c.scatter([foreline_id_mm], [current_C], color='red', s=100, zorder=5, label=f'Current: {foreline_id_mm:.0f} mm')
-            ax_c.legend()
-
-            # Add diminishing returns annotation
-            if len(C_vs_d) > 0 and max(C_vs_d) > 0:
-                idx_80 = np.where(C_vs_d >= 0.8 * max(C_vs_d))[0]
-                if len(idx_80) > 0:
-                    d_hint = diameters[idx_80[0]]
-                    ax_c.axvline(d_hint, color='orange', linestyle='--', alpha=0.7)
-                    ax_c.text(d_hint + 5, max(C_vs_d) * 0.9, f'Diminishing returns\n~{d_hint:.0f} mm',
-                             bbox=dict(boxstyle="round,pad=0.3", facecolor="orange", alpha=0.3))
-
-            plt.tight_layout()
-            buf_c = io.BytesIO()
-            fig_c.savefig(buf_c, format='png', dpi=150, bbox_inches='tight')
-            fig_c_png = buf_c.getvalue()
-            buf_c.close()
-            plt.close(fig_c)
-
-            st.image(fig_c_png, use_column_width=True)
-            st.markdown("**Inference:** Increasing foreline diameter improves conductance rapidly for small diameters; beyond a point returns diminish and routing/space constraints dominate.")
-
-            # Create vacuum report data
-            df_vac = pd.DataFrame({
-                'Parameter': [
-                    'Chamber volume (L)',
-                    'Leak (mbar·L/s)',
-                    'Target pressure (mbar)',
-                    'Required S (L/s)',
-                    'Foreline conductance (L/s)',
-                    'Effective S (L/s)',
-                    'Time constant (s)',
-                    'Pump-down time (min)'
-                ],
-                'Value': [
-                    chamber_volume_l,
-                    leak_rate_mbarL_s,
-                    desired_pressure_mbar,
-                    S_required_Ls,
-                    C_molecular_Ls if not np.isinf(C_molecular_Ls) else 999999,
-                    S_effective_Ls if not np.isnan(S_effective_Ls) else 0,
-                    tau_sec if not np.isinf(tau_sec) else 999999,
-                    t_to_target_sec/60.0 if not np.isinf(t_to_target_sec) else 999999
-                ]
-            })
-
-            # Notes & Limitations
-            st.markdown("---")
-            st.subheader("Notes & Limitations")
-            st.write("• This calculator uses simplified steady-state/first-order transient models.")
-            st.write("• Conductance of piping, gas composition, water vapor loads and molecular vs viscous flow regime effects are NOT fully accounted for.")
-            st.write("• For turbomolecular systems, consult vendor for foreline conductance, required backing speed, and ultimate pressure with gas load.")
-            st.write("• Units: 1 mbar·L/s = 0.1 Pa·m³/s. Pumping speed is given in L/s (typical vacuum industry unit).")
-            st.write("• Vacuum pump power estimation is simplified and does not account for pump specific curves or efficiency variations with pressure/flow.")
-
-
-            # Excel export for vacuum
-            if st.button("Generate Vacuum Excel Report", type="primary"):
-                excel_bytes = create_excel_report_vacuum(df_vac, fig_c_png)
-                if excel_bytes:
-                    st.download_button(
-                        "📥 Download Vacuum Report (xlsx)",
-                        data=excel_bytes,
-                        file_name=f"vacuum_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                    )
 
         except Exception as e:
-            st.error(f"Calculation error: {e}")
-            st.error("Please check your input values and try again.")
+            st.error(f"❌ Error: {e}")
 
-# Footer note
+# ------------------ System Comparison Page ------------------
+elif page == "Pump System Comparison":
+    st.header("⚖️ Pump System Comparison Tool")
+    st.write("Compare multiple pump configurations side-by-side")
+    st.info("Enter parameters for up to 3 different pump systems to compare")
+    num_systems = st.slider("Number of systems to compare", 2, 3, 2)
+    comparison_data = []
+    cols = st.columns(num_systems)
+    for i, col in enumerate(cols):
+        with col:
+            st.subheader(f"System {i+1}")
+            with st.form(f"system_{i}"):
+                name = st.text_input("System Name", value=f"System {i+1}")
+                flow = st.number_input("Flow (m³/h)", value=100.0*(i+1))
+                head = st.number_input("Head (m)", value=20.0+i*5)
+                efficiency = st.number_input("Efficiency (%)", value=70.0+i*3)
+                power = st.number_input("Power (kW)", value=10.0+i*2)
+                # --- CHANGED CURRENCY ---
+                cost = st.number_input("Capital Cost (₹)", value=5000.0*(i+1)) # Changed currency
+                submitted = st.form_submit_button("Add")
+                if submitted:
+                    comparison_data.append({
+                        'Name': name,
+                        'Flow (m³/h)': flow,
+                        'Head (m)': head,
+                        'Efficiency (%)': efficiency,
+                        'Power (kW)': power,
+                        # --- CHANGED CURRENCY ---
+                        'Capital Cost (₹)': cost # Changed currency
+                    })
+
+    if len(comparison_data) >= 2:
+        df_comp = pd.DataFrame(comparison_data)
+        st.markdown("---")
+        st.subheader("Comparison Results")
+        st.dataframe(df_comp, use_container_width=True)
+
+        # Add Calculate button for analysis
+        if st.button("Calculate Best Pump"):
+            # Create normalized scores for each parameter (higher is better)
+            df_comp['Efficiency Score'] = df_comp['Efficiency (%)'] / df_comp['Efficiency (%)'].max()
+            df_comp['Power Score'] = 1 - (df_comp['Power (kW)'] / df_comp['Power (kW)'].max())  # Lower power is better
+            df_comp['Cost Score'] = 1 - (df_comp['Capital Cost (₹)'] / df_comp['Capital Cost (₹)'].max())  # Lower cost is better
+            df_comp['Flow Score'] = df_comp['Flow (m³/h)'] / df_comp['Flow (m³/h)'].max()
+            df_comp['Head Score'] = df_comp['Head (m)'] / df_comp['Head (m)'].max()
+            
+            # Calculate weighted total score (adjust weights based on importance)
+            weights = {
+                'Efficiency': 0.3,
+                'Power': 0.25,
+                'Cost': 0.2,
+                'Flow': 0.15,
+                'Head': 0.1
+            }
+            
+            df_comp['Total Score'] = (
+                df_comp['Efficiency Score'] * weights['Efficiency'] +
+                df_comp['Power Score'] * weights['Power'] +
+                df_comp['Cost Score'] * weights['Cost'] +
+                df_comp['Flow Score'] * weights['Flow'] +
+                df_comp['Head Score'] * weights['Head']
+            )
+            
+            # Find the best pump
+            best_pump = df_comp.loc[df_comp['Total Score'].idxmax()]
+            
+            # Display results
+            st.success(f"🏆 Recommended Pump: {best_pump['Name']}")
+            
+            # Create a scoring breakdown
+            st.write("### Scoring Breakdown")
+            scores_df = pd.DataFrame({
+                'Parameter': ['Efficiency', 'Power Consumption', 'Capital Cost', 'Flow Rate', 'Head'],
+                'Weight': [weights['Efficiency'], weights['Power'], weights['Cost'], weights['Flow'], weights['Head']],
+                f"{best_pump['Name']} Score": [
+                    f"{best_pump['Efficiency Score']*100:.1f}%",
+                    f"{best_pump['Power Score']*100:.1f}%",
+                    f"{best_pump['Cost Score']*100:.1f}%",
+                    f"{best_pump['Flow Score']*100:.1f}%",
+                    f"{best_pump['Head Score']*100:.1f}%"
+                ]
+            })
+            st.table(scores_df)
+            
+            # Add explanation
+            st.write("### Analysis")
+            advantages = []
+            if best_pump['Efficiency Score'] > 0.8:
+                advantages.append("high efficiency")
+            if best_pump['Power Score'] > 0.8:
+                advantages.append("optimal power consumption")
+            if best_pump['Cost Score'] > 0.8:
+                advantages.append("competitive cost")
+            
+            st.write(f"**{best_pump['Name']}** is recommended due to its {', '.join(advantages)}. "
+                    f"It achieved the highest overall score of {best_pump['Total Score']*100:.1f}%.")
+            
+            # Add recommendations
+            st.write("### Recommendations")
+            if best_pump['Efficiency Score'] < 0.7:
+                st.warning("⚠️ Consider options with higher efficiency for long-term savings.")
+            if best_pump['Power Score'] < 0.7:
+                st.warning("⚠️ Higher power consumption might increase operating costs.")
+            if best_pump['Cost Score'] < 0.7:
+                st.warning("⚠️ Initial cost is relatively high - evaluate ROI carefully.")
+
+        # Comparison charts
+        fig_comp, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+        # Efficiency comparison
+        axes[0,0].bar(df_comp['Name'], df_comp['Efficiency (%)'], color=['blue', 'green', 'orange'][:len(df_comp)])
+        axes[0,0].set_ylabel('Efficiency (%)')
+        axes[0,0].set_title('Efficiency Comparison')
+        axes[0,0].grid(True, alpha=0.3)
+
+        # Power comparison
+        axes[0,1].bar(df_comp['Name'], df_comp['Power (kW)'], color=['red', 'purple', 'brown'][:len(df_comp)])
+        axes[0,1].set_ylabel('Power (kW)')
+        axes[0,1].set_title('Power Consumption')
+        axes[0,1].grid(True, alpha=0.3)
+
+        # Cost comparison
+        # --- CHANGED CURRENCY ---
+        axes[1,0].bar(df_comp['Name'], df_comp['Capital Cost (₹)'], color=['cyan', 'magenta', 'yellow'][:len(df_comp)]) # Changed currency
+        # --- CHANGED CURRENCY ---
+        axes[1,0].set_ylabel('Cost (₹)') # Changed currency
+        axes[1,0].set_title('Capital Cost')
+        axes[1,0].grid(True, alpha=0.3)
+
+        # Flow vs Head scatter
+        axes[1,1].scatter(df_comp['Flow (m³/h)'], df_comp['Head (m)'], s=200, c=['blue', 'green', 'orange'][:len(df_comp)])
+        for idx, row in df_comp.iterrows():
+            axes[1,1].annotate(row['Name'], (row['Flow (m³/h)'], row['Head (m)']), 
+                              xytext=(5, 5), textcoords='offset points')
+        axes[1,1].set_xlabel('Flow (m³/h)')
+        axes[1,1].set_ylabel('Head (m)')
+        axes[1,1].set_title('Operating Points')
+        axes[1,1].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        st.pyplot(fig_comp)
+        plt.close()
+
+# ------------------ Life Cycle Cost Analysis Page ------------------
+elif page == "Life Cycle Cost Analysis":
+    st.header("💰 Detailed Life Cycle Cost Analysis")
+    with st.form("lcc_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Capital Costs")
+            # --- CHANGED CURRENCY ---
+            pump_cost = st.number_input("Pump cost (₹)", value=5000.0) # Changed currency
+            # --- CHANGED CURRENCY ---
+            motor_cost = st.number_input("Motor cost (₹)", value=2000.0) # Changed currency
+            # --- CHANGED CURRENCY ---
+            installation_cost = st.number_input("Installation (₹)", value=1500.0) # Changed currency
+            st.subheader("Operating Parameters")
+            operating_hours_year = st.number_input("Hours/year", value=8000.0)
+            # --- CHANGED DEFAULT COST AND UNIT ---
+            electricity_rate = st.number_input("Electricity (₹/kWh)", value=10.0) / 100 # Changed default and unit
+            power_kW = st.number_input("Power consumption (kW)", value=15.0)
+        with col2:
+            st.subheader("Maintenance Costs")
+            # --- CHANGED CURRENCY ---
+            annual_maintenance = st.number_input("Annual maintenance (₹)", value=500.0) # Changed currency
+            # --- CHANGED CURRENCY ---
+            major_overhaul_cost = st.number_input("Major overhaul (₹)", value=3000.0) # Changed currency
+            overhaul_interval_years = st.number_input("Overhaul interval (years)", value=5.0)
+            st.subheader("Analysis Period")
+            analysis_years = st.number_input("Analysis period (years)", value=15.0, min_value=1.0, max_value=30.0)
+            discount_rate = st.number_input("Discount rate (%)", value=5.0) / 100
+        calculate_lcc = st.form_submit_button("Calculate Life Cycle Cost", type="primary")
+
+    if calculate_lcc:
+        # Calculate costs over time
+        years = np.arange(1, int(analysis_years) + 1)
+        # Initial costs
+        initial_cost = pump_cost + motor_cost + installation_cost
+        # Annual energy cost
+        annual_energy_cost = power_kW * operating_hours_year * electricity_rate
+        # Build cost arrays
+        capital_costs = np.zeros(len(years))
+        capital_costs[0] = initial_cost
+        energy_costs = np.ones(len(years)) * annual_energy_cost
+        maintenance_costs = np.ones(len(years)) * annual_maintenance
+        # Add overhaul costs
+        overhaul_costs = np.zeros(len(years))
+        for year in years:
+            if year % overhaul_interval_years == 0:
+                overhaul_costs[year-1] = major_overhaul_cost
+        # Total annual costs
+        total_annual_costs = capital_costs + energy_costs + maintenance_costs + overhaul_costs
+        # Apply discount rate
+        discount_factors = 1 / (1 + discount_rate) ** years
+        npv_costs = total_annual_costs * discount_factors
+        cumulative_npv = np.cumsum(npv_costs)
+
+        # Display results
+        # --- CHANGED CURRENCY ---
+        st.success(f"✅ Total Life Cycle Cost (NPV): ₹{cumulative_npv[-1]:,.2f}") # Changed currency
+        col_res1, col_res2, col_res3 = st.columns(3)
+        with col_res1:
+            # --- CHANGED CURRENCY ---
+            st.metric("Initial Investment", f"₹{initial_cost:,.2f}") # Changed currency
+            # --- CHANGED CURRENCY ---
+            st.metric("Total Energy Cost", f"₹{np.sum(energy_costs * discount_factors):,.2f}") # Changed currency
+        with col_res2:
+            # --- CHANGED CURRENCY ---
+            st.metric("Total Maintenance", f"₹{np.sum(maintenance_costs * discount_factors):,.2f}") # Changed currency
+            # --- CHANGED CURRENCY ---
+            st.metric("Total Overhauls", f"₹{np.sum(overhaul_costs * discount_factors):,.2f}") # Changed currency
+        with col_res3:
+            energy_pct = np.sum(energy_costs * discount_factors) / cumulative_npv[-1] * 100
+            st.metric("Energy % of LCC", f"{energy_pct:.1f}%")
+            # --- CHANGED CURRENCY ---
+            st.metric("Avg Annual Cost", f"₹{cumulative_npv[-1]/analysis_years:,.2f}") # Changed currency
+
+        # Visualization
+        fig_lcc, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+        # Cumulative NPV
+        ax1.plot(years, cumulative_npv/1000, 'b-', linewidth=2, marker='o')
+        ax1.set_xlabel('Years', fontweight='bold')
+        # --- CHANGED CURRENCY ---
+        ax1.set_ylabel('Cumulative NPV (₹1000s)', fontweight='bold') # Changed currency
+        ax1.set_title('Life Cycle Cost Over Time', fontweight='bold')
+        ax1.grid(True, alpha=0.3)
+
+        # Cost breakdown
+        labels = ['Energy', 'Maintenance', 'Overhauls', 'Initial']
+        sizes = [
+            np.sum(energy_costs * discount_factors),
+            np.sum(maintenance_costs * discount_factors),
+            np.sum(overhaul_costs * discount_factors),
+            initial_cost * discount_factors[0]
+        ]
+        colors = ['#ff9999', '#66b3ff', '#99ff99', '#ffcc99']
+        ax2.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=90)
+        ax2.set_title('Cost Distribution', fontweight='bold')
+
+        plt.tight_layout()
+        st.pyplot(fig_lcc)
+        plt.close()
+
+# Footer
 st.markdown("---")
-st.caption("⚠️ This tool provides engineering estimates to help procurement and vendor discussions. Validate with vendor curves, conductance calculations and field data before procurement.")
+st.caption("⚠️ Engineering estimates only. Validate with vendor data before procurement.")
 
-# Add sidebar info
+# --- Updated Sidebar with rupee symbol and cost ---
 with st.sidebar:
     st.markdown("---")
-    st.markdown("### About This Tool")
-    st.markdown("This calculator provides preliminary sizing for:")
-    st.markdown("• Centrifugal and positive displacement pumps")
-    st.markdown("• Vacuum pumps and systems")
-    st.markdown("• NPSH calculations")
-    st.markdown("• Power requirements")
-    st.markdown("• Vendor selection guidance")
-
+    st.markdown("### 🎯 Enhanced Features")
+    st.markdown("**Rotating Pumps:**")
+    st.markdown("✓ Multi-pump configurations (parallel/series)")
+    st.markdown("✓ Affinity laws speed analysis")
+    st.markdown("✓ NPSH margin visualization")
+    st.markdown("✓ Pipe sizing optimization")
+    st.markdown("✓ Vibration & pulsation risk")
+    st.markdown("✓ Component life prediction")
+    st.markdown("✓ Failure mode analysis")
+    st.markdown("✓ Seal life estimation")
+    st.markdown("✓ Wear rate calculation")
     st.markdown("---")
-    st.markdown("### Tips")
-    st.markdown("• Always validate results with vendor data")
-    st.markdown("• Consider safety margins for critical applications")
-    st.markdown("• Upload vendor catalogs for automatic matching")
-    st.markdown("• Export results for vendor discussions")
+    st.markdown("**Vacuum Systems:**")
+    st.markdown("✓ Gas load scenarios")
+    st.markdown("✓ Conductance optimization")
+    st.markdown("✓ Speed vs pressure curves")
+    st.markdown("✓ Ultimate pressure analysis")
+    st.markdown("✓ Process-specific recommendations")
+    st.markdown("✓ Crossover pressure guidance")
+    st.markdown("---")
+    st.markdown("**Analysis Tools:**")
+    st.markdown("✓ Energy cost projections (10-year)")
+    st.markdown("✓ Efficiency upgrade ROI")
+    st.markdown("✓ System comparison (up to 3)")
+    st.markdown("---")
+    st.markdown("### 📚 Resources")
+    st.markdown("[Pump Selection Guide](#)")
+    st.markdown("[Affinity Laws](#)")
+    st.markdown("[NPSH Requirements](#)")
+    # --- Added default electricity cost ---
+    st.markdown("⚡ Default Electricity Cost: 10 ₹/kWh")
+    # Process Parameters quick-table (adds a user-triggered table on the Rotating Pumps page)
+    if page == "Rotating Pumps (Centrifugal etc.)":
+        if st.button("🔎 Show Process Parameters Table"):
+            try:
+                # helper to safely read widget values from session_state
+                get = lambda key, default=None: st.session_state.get(key, default)
+
+                # Read inputs (use same labels as the widgets in the form)
+                Q_input = get("Flow rate", 100.0)
+                Q_unit = get("Flow unit", "m³/h")
+                T = get("Fluid temperature (°C)", 25.0)
+                material_type = get("Fluid type", "Water")
+                SG = get("Specific gravity", 1.0)
+                mu_cP = get("Viscosity (cP)", 1.0)
+                particle_size = get("Average particle size (mm)", 0.0)
+                override_density = get("Override density (kg/m³)?", False)
+                density_user = get("Density (kg/m³)", 1000.0)
+                density = density_user if override_density else 1000.0 * SG
+
+                D_inner = get("Pipe inner diameter (mm)", 100.0)
+                L_pipe = get("Pipe length (m)", 100.0)
+                elevation_in = get("Suction elevation (m)", 0.0)
+                elevation_out = get("Discharge elevation (m)", 10.0)
+                K_fittings = get("Total K (fittings)", 2.0)
+                eps_mm = get("Roughness (mm)", 0.045)
+                pump_config = get("Pump arrangement", "Single")
+                n_pumps = get("Number of pumps", 1)
+
+                pump_eff_pct = get("Pump efficiency (%)", 70.0)
+                motor_eff_pct = get("Motor efficiency (%)", 95.0)
+                safety_margin_head_pct = get("Design margin on head (%)", 10.0)
+                safety_margin_flow_pct = get("Design margin on flow (%)", 10.0)
+                service_factor = get("Service factor", 1.15)
+                pump_speed_rpm = get("Pump speed (RPM)", 1450.0)
+
+                atm_pressure_kPa = get("Atmospheric pressure (kPa)", 101.325)
+                vapor_pressure_kPa = get("Vapor pressure (kPa)", 2.3)
+                friction_for_NPSH = get("Suction friction head (m)", 2.0)
+                NPSHr_vendor = get("Vendor NPSHr (m) [optional]", 0.0)
+
+                # Convert flow to m3/s (same conversions as main form)
+                if Q_unit == 'm³/h':
+                    Q_m3s = Q_input / 3600.0
+                elif Q_unit == 'L/s':
+                    Q_m3s = Q_input / 1000.0
+                elif Q_unit == 'm³/d':
+                    Q_m3s = Q_input / (24*3600)
+                elif Q_unit == 'GPM (US)':
+                    Q_m3s = Q_input * 0.00378541178 / 60.0
+                else:
+                    Q_m3s = Q_input
+
+                mu = mu_cP / 1000.0
+                D_m = D_inner / 1000.0
+                V = velocity_from_flow(Q_m3s, D_m)
+                Re = reynolds(density, V, D_m, mu)
+
+                # Build table
+                proc_params = {
+                    "Flow (user)": f"{Q_input} {Q_unit}",
+                    "Flow (m³/s)": f"{Q_m3s:.6e}",
+                    "Temperature (°C)": f"{T:.1f}",
+                    "Fluid type": material_type,
+                    "Specific gravity": f"{SG:.3f}",
+                    "Density (kg/m³)": f"{density:.1f}",
+                    "Viscosity (cP)": f"{mu_cP:.3f}",
+                    "Particle size (mm)": f"{particle_size:.3f}" if particle_size else "N/A",
+                    "Pipe ID (mm)": f"{D_inner:.1f}",
+                    "Pipe length (m)": f"{L_pipe:.2f}",
+                    "Elevation in / out (m)": f"{elevation_in:.2f} / {elevation_out:.2f}",
+                    "Fittings K (total)": f"{K_fittings:.2f}",
+                    "Roughness (mm)": f"{eps_mm:.4f}",
+                    "Pump arrangement": pump_config,
+                    "Number of pumps": f"{n_pumps}",
+                    "Pump efficiency (%)": f"{pump_eff_pct:.1f}",
+                    "Motor efficiency (%)": f"{motor_eff_pct:.1f}",
+                    "Design head margin (%)": f"{safety_margin_head_pct:.1f}",
+                    "Design flow margin (%)": f"{safety_margin_flow_pct:.1f}",
+                    "Service factor": f"{service_factor:.2f}",
+                    "Pump speed (RPM)": f"{pump_speed_rpm:.0f}",
+                    "Velocity (m/s)": f"{V:.3f}",
+                    "Reynolds #": f"{Re:.0f}",
+                    "Atmospheric pressure (kPa)": f"{atm_pressure_kPa:.3f}",
+                    "Vapor pressure (kPa)": f"{vapor_pressure_kPa:.3f}",
+                    "Suction friction for NPSH (m)": f"{friction_for_NPSH:.2f}",
+                    "Vendor NPSHr (m)": (f"{NPSHr_vendor:.2f}" if NPSHr_vendor > 0 else "N/A")
+                }
+
+                df_proc = pd.DataFrame(list(proc_params.items()), columns=["Parameter", "Value"])
+                with st.expander("📋 Process Parameters", expanded=True):
+                    st.dataframe(df_proc, use_container_width=True, hide_index=True)
+
+            except Exception as err:
+                st.error(f"Unable to build process table: {err}")
