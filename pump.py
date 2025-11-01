@@ -1626,6 +1626,8 @@ elif page == "Life Cycle Cost Analysis":
             st.subheader("Analysis Period")
             analysis_years = st.number_input("Analysis period (years)", value=15.0, min_value=1.0, max_value=30.0)
             discount_rate = st.number_input("Discount rate (%)", value=5.0) / 100
+        
+        # Submit button for the form
         calculate_lcc = st.form_submit_button("Calculate Life Cycle Cost", type="primary")
 
     if calculate_lcc:
