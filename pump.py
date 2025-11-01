@@ -1,9 +1,11 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import math
 import matplotlib.pyplot as plt
 import io
+import json
 from datetime import datetime
 
 # Set page config at the very top
@@ -13,34 +15,154 @@ st.title("🔧 Advanced Pump & Vacuum Pump Sizing Sheet — Vendor Ready")
 # Simple navigation between pages
 page = st.sidebar.selectbox("Choose tool", [
     "Rotating Pumps (Centrifugal etc.)", 
-    "Vacuum Pump Calculator",
     "Pump System Comparison",
     "Life Cycle Cost Analysis"
 ])
 
 # ------------------ Helper functions ------------------
-def colebrook_f(Re, D, eps_rel, tol=1e-6, max_iter=50):
-    """Calculate friction factor using Colebrook equation"""
-    if Re <= 0:
+def colebrook_newton(Re, eps_abs, D, tol=1e-12, maxiter=50):
+    """Solve Colebrook for friction factor f using Newton-Raphson.
+
+    Re: Reynolds number
+    eps_abs: absolute roughness (same units as D)
+    D: pipe diameter
+    Returns Darcy friction factor f.
+    """
+    if Re <= 0 or D <= 0:
+        raise ValueError("Re and D must be positive")
+    if Re < 2300:
+        return 64.0 / Re
+
+    A = eps_abs / (3.7 * D)
+    B = 2.51 / Re
+    # Swamee-Jain initial guess (good starting point)
+    try:
+        f = 0.25 / (math.log10(A + 2.51 / Re) ** 2)
+    except Exception:
+        f = 0.02
+
+    for i in range(maxiter):
+        sqrtf = math.sqrt(f)
+        arg = A + B / sqrtf
+        if arg <= 0:
+            arg = 1e-16
+        F = 1.0 / sqrtf + 2.0 * math.log10(arg)
+
+        # derivative dF/df = -1/(2 f^{3/2}) - (B / ln(10)) * f^{-3/2} / arg
+        ln10 = math.log(10.0)
+        dF_df = -0.5 * f ** (-1.5) - (B / ln10) * f ** (-1.5) / arg
+
+        # guard against zero derivative
+        if dF_df == 0:
+            break
+
+        delta = -F / dF_df
+        f_new = f + delta
+
+        # keep positive and avoid huge jumps
+        if f_new <= 0 or not math.isfinite(f_new):
+            f_new = max(1e-12, f * 0.5)
+
+        if abs(f_new - f) < tol * max(1.0, f):
+            return f_new
+
+        f = f_new
+
+    raise RuntimeError(f"Newton-Raphson did not converge after {maxiter} iterations; last f={f}")
+
+
+def colebrook_brent_like(Re, eps_abs, D, tol=1e-12, maxiter=100):
+    """Bracketed secant/bisection hybrid solver for Colebrook (robust).
+    Returns Darcy friction factor f.
+    """
+    if Re <= 0 or D <= 0:
+        raise ValueError("Re and D must be positive")
+    if Re < 2300:
+        return 64.0 / Re
+
+    A = eps_abs / (3.7 * D)
+    B = 2.51 / Re
+
+    def F_of_f(f):
+        sqrtf = math.sqrt(f)
+        arg = A + B / sqrtf
+        if arg <= 0:
+            arg = 1e-16
+        return 1.0 / sqrtf + 2.0 * math.log10(arg)
+
+    lo = 1e-12
+    hi = 1.0
+    Flo = F_of_f(lo)
+    Fhi = F_of_f(hi)
+
+    attempts = 0
+    while Flo * Fhi > 0 and attempts < 50:
+        hi *= 2.0
+        Fhi = F_of_f(hi)
+        attempts += 1
+
+    if Flo * Fhi > 0:
+        # fallback to explicit Swamee-Jain guess
+        try:
+            f_guess = 0.25 / (math.log10(A + 2.51 / Re) ** 2)
+            val = F_of_f(f_guess)
+            if abs(val) < 1e-12:
+                return f_guess
+        except Exception:
+            f_guess = 0.02
+        lo = max(1e-12, f_guess * 0.1)
+        hi = max(f_guess * 10.0, 1e-3)
+        Flo = F_of_f(lo)
+        Fhi = F_of_f(hi)
+
+    candidate = 0.5 * (lo + hi)
+    for i in range(maxiter):
+        if (Fhi - Flo) != 0:
+            f_secant = (lo * Fhi - hi * Flo) / (Fhi - Flo)
+        else:
+            f_secant = 0.5 * (lo + hi)
+
+        if lo < f_secant < hi:
+            candidate = f_secant
+        else:
+            candidate = 0.5 * (lo + hi)
+
+        Fc = F_of_f(candidate)
+        if abs(Fc) < 1e-14 or (hi - lo) < tol * max(1.0, candidate):
+            return max(candidate, 1e-16)
+
+        if Flo * Fc <= 0:
+            hi = candidate
+            Fhi = Fc
+        else:
+            lo = candidate
+            Flo = Fc
+
+    raise RuntimeError(f"Bracketed solver did not converge after {maxiter} iterations; last candidate={candidate}")
+
+
+def colebrook_f(Re, D, eps_abs, method='brent', tol=1e-6, max_iter=100):
+    """Unified Colebrook friction-factor solver.
+
+    method: 'swamee' (explicit Swamee-Jain), 'newton', or 'brent'
+    eps_abs: absolute roughness (same units as D)
+    """
+    if Re <= 0 or D <= 0:
         return np.nan
     if Re < 2300:
         return 64.0 / Re
-    try:
-        A = eps_rel / D / 3.7
-        B = 5.74 / (Re**0.9)
-        f = 0.25 / (math.log10(A + B))**2
-        for _ in range(max_iter):
-            denominator = eps_rel / (3.7*D) + 2.51/(Re*math.sqrt(f))
-            if denominator <= 0:
-                break
-            new = (-2.0 * math.log10(denominator))**-2
-            if abs(new - f) < tol:
-                f = new
-                break
-            f = new
-        return f
-    except (ValueError, ZeroDivisionError):
-        return 0.02
+
+    method = (method or 'brent').lower()
+    if method.startswith('swamee'):
+        # Swamee-Jain explicit formula (fast approximate)
+        try:
+            return 0.25 / (math.log10(eps_abs/(3.7*D) + 5.74/(Re**0.9)) ** 2)
+        except Exception:
+            return 0.02
+    elif method.startswith('newton'):
+        return colebrook_newton(Re, eps_abs, D, tol=min(tol,1e-8), maxiter=max_iter)
+    else:
+        return colebrook_brent_like(Re, eps_abs, D, tol=min(tol,1e-8), maxiter=max_iter)
 
 def darcy_head_loss(f, L, D, V, g=9.81):
     """Calculate head loss using Darcy-Weisbach equation"""
@@ -49,283 +171,7 @@ def darcy_head_loss(f, L, D, V, g=9.81):
     return f * (L/D) * (V**2) / (2*g)
 
 def reynolds(rho, V, D, mu):
-    """Calculate Reynolds number"""
-    if mu <= 0:
-        return 0
-    return (rho * V * D) / mu
-
-def velocity_from_flow(Q, D):
-    """Calculate velocity from flow rate and diameter"""
-    if D <= 0:
-        return 0
-    A = math.pi * (D**2) / 4.0
-    return Q / A if A > 0 else 0
-
-def minor_loss_head(K_total, V, g=9.81):
-    """Calculate minor losses head"""
-    return K_total * (V**2) / (2*g)
-
-def pump_power_required(rho, g, Q, H, pump_efficiency, motor_efficiency=0.95):
-    """Calculate pump power requirements"""
-    if pump_efficiency <= 0 or motor_efficiency <= 0:
-        return 0, 0
-    shaft_watts = rho * g * Q * H / pump_efficiency
-    electrical_watts = shaft_watts / motor_efficiency
-    return shaft_watts/1000.0, electrical_watts/1000.0
-
-def calculate_affinity_laws(Q1, H1, N1, N2):
-    """Apply pump affinity laws for speed changes"""
-    Q2 = Q1 * (N2/N1)
-    H2 = H1 * (N2/N1)**2
-    P2_ratio = (N2/N1)**3
-    return Q2, H2, P2_ratio
-
-def calculate_parallel_pumps(n_pumps, Q_single, H_single):
-    """Calculate parallel pump operation"""
-    Q_total = n_pumps * Q_single
-    H_total = H_single  # Head remains same
-    return Q_total, H_total
-
-def calculate_series_pumps(n_pumps, Q_single, H_single):
-    """Calculate series pump operation"""
-    Q_total = Q_single  # Flow remains same
-    H_total = n_pumps * H_single
-    return Q_total, H_total
-
-def calculate_cavitation_index(NPSHa, H):
-    """Calculate Thoma cavitation number"""
-    if H <= 0:
-        return np.nan
-    return NPSHa / H
-
-def suggest_impeller(material):
-    """Suggest impeller type based on material"""
-    mapping = {
-        'Water': 'Cast iron closed impeller',
-        'Seawater': 'Bronze open impeller',
-        'Acids': 'PVDF or Stainless steel semi-open impeller',
-        'Slurry': 'High-chrome open impeller',
-        'Food-grade': 'Stainless steel closed impeller',
-        'Oil': 'Cast Iron or Stainless Steel',
-        'Alkaline': 'Stainless Steel or hastelloy',
-        'More': 'Consult vendor'
-    }
-    return mapping.get(material, 'Consult vendor')
-
-def suggest_density_range(fluid_type):
-    """Suggest density range based on fluid type"""
-    ranges = {
-        'Water': (990, 1000),
-        'Seawater': (1020, 1030),
-        'Acids': (1050, 1840),
-        'Slurry': (1100, 2000),
-        'Food-grade': (1000, 1500),
-        'Oil': (700, 950),
-        'Alkaline': (1050, 1500),
-        'More': (None, None)
-    }
-    return ranges.get(fluid_type, (None, None))
-
-def compute_bep(Q_points, eff_curve):
-    """Find Best Efficiency Point"""
-    if len(eff_curve) == 0:
-        return 0, 0, 0
-    idx = np.nanargmax(eff_curve)
-    return Q_points[idx], eff_curve[idx], idx
-
-def generate_pump_curves(Q_design, total_head_design, static_head):
-    """Generate representative pump and system curves"""
-    if Q_design <= 0:
-        Q_design = 1e-6
-    Q_points = np.linspace(max(1e-9, Q_design*0.1), Q_design*1.6, 200)
-    # System curve
-    a = (total_head_design - static_head) / (Q_design**2) if Q_design > 0 else 0
-    H_system = static_head + a * (Q_points**2)
-    # Pump curve
-    H0 = total_head_design*1.15
-    k = H0 / ((Q_design*1.4)**2) if Q_design > 0 else 0
-    H_pump = H0 - k * (Q_points**2)
-    # Efficiency curve
-    eff_curve = np.clip(0.45 + 0.4 * np.exp(-((Q_points-Q_design)/(Q_design*0.25))**2), 0.1, 0.95)
-    # Power curve
-    power_curve = np.zeros_like(Q_points)
-    for i, (q, h, eff) in enumerate(zip(Q_points, H_pump, eff_curve)):
-        if eff > 0:
-            power_curve[i] = 1000 * 9.81 * q * h / eff / 1000.0
-    return Q_points, H_system, H_pump, eff_curve, power_curve
-
-def calculate_suction_specific_speed(N, Q, NPSHr):
-    """Calculate suction specific speed (Nss)"""
-    if NPSHr <= 0:
-        return np.nan
-    # Nss = N * sqrt(Q) / (NPSHr)^0.75
-    return N * np.sqrt(Q * 3600) / (NPSHr**0.75)
-
-def estimate_wear_rate(material_type, V, particle_size=0):
-    """Estimate relative wear rate"""
-    base_wear = {'Water': 1, 'Seawater': 2, 'Acids': 3, 'Slurry': 10, 
-                 'Food-grade': 1, 'Oil': 0.5, 'Alkaline': 2, 'More': 1}
-    wear = base_wear.get(material_type, 1)
-    # Velocity impact
-    if V > 3:
-        wear *= (1 + 0.5 * (V - 3))
-    # Particle impact for slurry
-    if material_type == 'Slurry' and particle_size > 0:
-        wear *= (1 + particle_size/10)
-    return wear
-
-# --- NEW: Missing Helper Functions for Rotating Pumps ---
-def calculate_vibration_severity(V, Re, material_type):
-    """Estimate vibration severity based on velocity and flow regime"""
-    severity = "Low"
-    color = "green"
-    if V > 4.0:
-        severity = "High"
-        color = "red"
-    elif V > 3.0 or (Re > 10000 and material_type in ['Slurry', 'Acids']):
-        severity = "Medium"
-        color = "orange"
-    return severity, color
-
-def calculate_pressure_pulsation(pump_type, Q_op, Q_bep):
-    """Estimate pulsation risk based on operating point vs BEP"""
-    if pump_type.lower() in ['centrifugal', 'axial']:
-        if abs(Q_op - Q_bep) / Q_bep > 0.3:
-            return "High", "red"
-        elif abs(Q_op - Q_bep) / Q_bep > 0.15:
-            return "Medium", "orange"
-        else:
-            return "Low", "green"
-    else: # Assume PD pumps have inherent pulsation
-        return "Medium", "orange"
-
-def estimate_seal_life(material_type, T, V):
-    """Estimate mechanical seal life based on fluid, temp, velocity"""
-    base_life = 20000 # hours
-    temp_factor = max(0.5, min(1.5, 1.0 - (T - 25) * 0.005)) # Degrades above 25C
-    velocity_factor = max(0.5, 1.0 - V * 0.05) # Degrades with velocity
-    material_factor = {'Water': 1.0, 'Seawater': 0.8, 'Acids': 0.7, 'Slurry': 0.5,
-                       'Food-grade': 0.9, 'Oil': 1.0, 'Alkaline': 0.7, 'More': 0.8}.get(material_type, 0.8)
-    
-    estimated_hours = base_life * temp_factor * velocity_factor * material_factor
-    return estimated_hours
-# --- END NEW FUNCTIONS ---
-
-# --- PDF Report Generation ---
-# def create_pdf_report_rotating(results_data):
-#     """Create a simple PDF report from results_data and return bytes."""
-#     buffer = io.BytesIO()
-#     doc = SimpleDocTemplate(buffer, pagesize=A4)
-#     styles = getSampleStyleSheet()
-#     story = []
-
-#     # Title
-#     story.append(Paragraph("Pump Sizing Report", styles['Title']))
-#     story.append(Spacer(1, 12))
-#     story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
-#     story.append(Spacer(1, 12))
-
-#     # Summary table: pick top-level scalar items
-#     rows = [("Parameter", "Value")]
-#     for k, v in results_data.items():
-#         if k in ['Q_points', 'H_pump', 'eff_curve', 'power_curve', 'Process Parameters']:
-#             continue
-#         val = v
-#         try:
-#             if hasattr(v, 'tolist') and not isinstance(v, (str, bytes)):
-#                 val = str(v.tolist())
-#             else:
-#                 val = str(v)
-#         except Exception:
-#             val = str(v)
-#         rows.append((k, val))
-
-#         table = Table(rows, colWidths=[200, 300])
-#         table.setStyle(TableStyle([
-#             ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-#             ('GRID', (0,0), (-1,-1), 0.5, colors.black),
-#             ('VALIGN', (0,0), (-1,-1), 'TOP'),
-#         ]))
-#         story.append(table)
-#         story.append(Spacer(1, 12))
-
-#         # Optional: include a short process parameters table if present
-#         pp = results_data.get('Process Parameters')
-#         if pp:
-#             story.append(Paragraph('Process Parameters', styles['h2']))
-#             pp_rows = [("Parameter", "Value")]
-#             if isinstance(pp, dict):
-#                 for k, v in pp.items():
-#                     pp_rows.append((k, str(v)))
-#             elif isinstance(pp, (list, tuple)):
-#                 for item in pp:
-#                     if isinstance(item, (list, tuple)) and len(item) >= 2:
-#                         pp_rows.append((str(item[0]), str(item[1])))
-#             pp_table = Table(pp_rows, colWidths=[200, 300])
-#             pp_table.setStyle(TableStyle([
-#                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-#                 ('GRID', (0,0), (-1,-1), 0.5, colors.black),
-#             ]))
-#             story.append(pp_table)
-
-#         # Embed charts (render matplotlib figures to PNG and insert)
-#         try:
-#             Q_pts = np.array(results_data.get('Q_points', []))
-#             H_pts = np.array(results_data.get('H_pump', []))
-#             eff_pts = np.array(results_data.get('eff_curve', []))
-#             pwr_pts = np.array(results_data.get('power_curve', []))
-
-#             # Only render if we have Q and H data
-#             if Q_pts.size and H_pts.size:
-#                 fig, ax = plt.subplots(figsize=(6, 3.5))
-#                 ax.plot(Q_pts * 3600, H_pts, 'r-', linewidth=2, label='Pump Curve')
-#                 ax.set_xlabel('Flow (m³/h)')
-#                 ax.set_ylabel('Head (m)')
-#                 ax.set_title('Pump Curve')
-#                 ax.grid(True, alpha=0.3)
-#                 buf = io.BytesIO()
-#                 plt.tight_layout()
-#                 fig.savefig(buf, format='png', dpi=150)
-#                 plt.close(fig)
-#                 buf.seek(0)
-#                 img = RLImage(buf, width=A4[0]-100, height=(A4[1]/4))
-#                 story.append(Spacer(1, 12))
-#                 story.append(img)
-
-#             # Efficiency or Power figure
-#             if Q_pts.size and (eff_pts.size or pwr_pts.size):
-#                 fig2, ax2 = plt.subplots(figsize=(6, 3.5))
-#                 if eff_pts.size:
-#                     ax2.plot(Q_pts * 3600, eff_pts * 100, 'g-', linewidth=2, label='Efficiency (%)')
-#                     ax2.set_ylabel('Efficiency (%)')
-#                 if pwr_pts.size:
-#                     ax3 = ax2.twinx()
-#                     ax3.plot(Q_pts * 3600, pwr_pts, 'purple', linewidth=2, label='Power (kW)')
-#                     ax3.set_ylabel('Power (kW)')
-#                 ax2.set_xlabel('Flow (m³/h)')
-#                 ax2.set_title('Efficiency & Power')
-#                 ax2.grid(True, alpha=0.3)
-#                 buf2 = io.BytesIO()
-#                 plt.tight_layout()
-#                 fig2.savefig(buf2, format='png', dpi=150)
-#                 plt.close(fig2)
-#                 buf2.seek(0)
-#                 img2 = RLImage(buf2, width=A4[0]-100, height=(A4[1]/4))
-#                 story.append(Spacer(1, 12))
-#                 story.append(img2)
-#         except Exception:
-#             # If plotting or embedding fails, continue without images
-#             pass
-
-#     doc.build(story)
-#     buffer.seek(0)
-#     data = buffer.getvalue()
-#     buffer.close()
-#     return data
-
-def fallback_simple_pdf(text_lines):
-    # Build PDF objects
-    lines = []
+ 
     obj_offsets = []
     offset = 0
 
@@ -375,33 +221,147 @@ def fallback_simple_pdf(text_lines):
 
     return b''.join(lines)
 
-    # Build textual summary
-    summary_lines = [f'Pump Sizing Report - Generated: {datetime.now().isoformat()}']
-    for k, v in results_data.items():
-        if k in ['Q_points', 'H_pump', 'eff_curve', 'power_curve', 'Process Parameters']:
-            continue
-        try:
-            if hasattr(v, 'tolist') and not isinstance(v, (str, bytes)):
-                val = str(v.tolist())
-            else:
-                val = str(v)
-        except Exception:
-            val = str(v)
-        summary_lines.append(f'{k}: {val}')
 
-        # Include a short process parameter list if available
-        pp = results_data.get('Process Parameters')
-        if pp:
-            summary_lines.append('--- Process Parameters ---')
-            if isinstance(pp, dict):
-                for k, v in pp.items():
-                    summary_lines.append(f'{k}: {v}')
-            elif isinstance(pp, (list, tuple)):
-                for item in pp:
-                    if isinstance(item, (list, tuple)) and len(item) >= 2:
-                        summary_lines.append(f'{item[0]}: {item[1]}')
+def _safe_get(locals_dict, key, default=None):
+    return locals_dict.get(key, default)
 
-        return fallback_simple_pdf(summary_lines)
+
+def _to_json_safe(v):
+    """Convert common numpy types to native Python types for JSON serialization."""
+    try:
+        if v is None:
+            return None
+        # numpy scalar
+        if hasattr(v, 'item') and not isinstance(v, (str, bytes, dict, list, tuple)):
+            try:
+                return v.item()
+            except Exception:
+                pass
+        # numpy array -> list
+        if hasattr(v, 'tolist') and not isinstance(v, (str, bytes, dict)):
+            try:
+                return v.tolist()
+            except Exception:
+                pass
+        # fallback
+        return v
+    except Exception:
+        return str(v)
+
+
+def generate_api610_checklist(locals_dict):
+    """Create a small API-610 style checklist based on key diagnostics.
+
+    Returns a list of dicts with 'Item', 'Status', 'Remarks'.
+    Status: Pass / Review / Fail
+    """
+    checklist = []
+    # NPSH check
+    NPSHa = _safe_get(locals_dict, 'NPSHa', None)
+    NPSHr = _safe_get(locals_dict, 'NPSHr_vendor', None)
+    if NPSHa is None or NPSHr is None or NPSHr == 0:
+        checklist.append({'Item': 'NPSH Margin', 'Status': 'Review', 'Remarks': 'Vendor NPSHr missing or insufficient data'})
+    else:
+        margin = NPSHa - NPSHr
+        if margin >= 1.0:
+            checklist.append({'Item': 'NPSH Margin', 'Status': 'Pass', 'Remarks': f'Margin {margin:.2f} m'})
+        elif margin >= 0.5:
+            checklist.append({'Item': 'NPSH Margin', 'Status': 'Review', 'Remarks': f'Margin {margin:.2f} m (low)'})
+        else:
+            checklist.append({'Item': 'NPSH Margin', 'Status': 'Fail', 'Remarks': f'Margin {margin:.2f} m (insufficient)'})
+
+    # Vibration check (use vibration_severity if available)
+    vib = _safe_get(locals_dict, 'vibration_severity', None)
+    if vib is None:
+        checklist.append({'Item': 'Vibration (Overall)', 'Status': 'Review', 'Remarks': 'No measurement'})
+    else:
+        if vib == 'Low':
+            checklist.append({'Item': 'Vibration (Overall)', 'Status': 'Pass', 'Remarks': 'Within acceptable limits'})
+        elif vib == 'Medium':
+            checklist.append({'Item': 'Vibration (Overall)', 'Status': 'Review', 'Remarks': 'Monitor and investigate trend'})
+        else:
+            checklist.append({'Item': 'Vibration (Overall)', 'Status': 'Fail', 'Remarks': 'Exceeds recommended levels'})
+
+    # Cavitation / erosion
+    erosion_score = _safe_get(locals_dict, 'erosion_score', None)
+    if erosion_score is None:
+        checklist.append({'Item': 'Cavitation / Erosion', 'Status': 'Review', 'Remarks': 'Insufficient data'})
+    else:
+        if erosion_score < 0.33:
+            checklist.append({'Item': 'Cavitation / Erosion', 'Status': 'Pass', 'Remarks': 'Low risk'})
+        elif erosion_score < 0.66:
+            checklist.append({'Item': 'Cavitation / Erosion', 'Status': 'Review', 'Remarks': 'Medium risk; consider mitigation'})
+        else:
+            checklist.append({'Item': 'Cavitation / Erosion', 'Status': 'Fail', 'Remarks': 'High risk; action recommended'})
+
+    # BEP deviation
+    pct_from_bep = _safe_get(locals_dict, 'pct_from_bep', None)
+    if pct_from_bep is None:
+        checklist.append({'Item': 'Operating point vs BEP', 'Status': 'Review', 'Remarks': 'No BEP data'})
+    else:
+        if pct_from_bep <= 10:
+            checklist.append({'Item': 'Operating point vs BEP', 'Status': 'Pass', 'Remarks': f'{pct_from_bep:.1f}% from BEP'})
+        elif pct_from_bep <= 20:
+            checklist.append({'Item': 'Operating point vs BEP', 'Status': 'Review', 'Remarks': f'{pct_from_bep:.1f}% from BEP (consider derating)'})
+        else:
+            checklist.append({'Item': 'Operating point vs BEP', 'Status': 'Fail', 'Remarks': f'{pct_from_bep:.1f}% from BEP (poor)'} )
+
+    # Seal life
+    seal_life = _safe_get(locals_dict, 'seal_life_hours', None)
+    if seal_life is None:
+        checklist.append({'Item': 'Seal Life', 'Status': 'Review', 'Remarks': 'No estimate'})
+    else:
+        if seal_life >= 20000:
+            checklist.append({'Item': 'Seal Life', 'Status': 'Pass', 'Remarks': f'Estimated {seal_life:.0f} h'})
+        elif seal_life >= 8000:
+            checklist.append({'Item': 'Seal Life', 'Status': 'Review', 'Remarks': f'Estimated {seal_life:.0f} h'})
+        else:
+            checklist.append({'Item': 'Seal Life', 'Status': 'Fail', 'Remarks': f'Estimated {seal_life:.0f} h (low)'} )
+
+    # Composite health
+    health_score = _safe_get(locals_dict, 'health_score', None)
+    if health_score is not None:
+        if health_score < 30:
+            checklist.append({'Item': 'Composite Health Score', 'Status': 'Pass', 'Remarks': f'Score {health_score:.0f}/100'})
+        elif health_score < 60:
+            checklist.append({'Item': 'Composite Health Score', 'Status': 'Review', 'Remarks': f'Score {health_score:.0f}/100'})
+        else:
+            checklist.append({'Item': 'Composite Health Score', 'Status': 'Fail', 'Remarks': f'Score {health_score:.0f}/100'})
+
+    return checklist
+
+
+def prepare_diagnostics_payload(locals_dict):
+    """Prepare a JSON-serializable diagnostics payload from local variables."""
+    payload = {
+        'timestamp': datetime.now().isoformat(),
+        'process': {
+            'Q_design_m3_s': _to_json_safe(_safe_get(locals_dict, 'Q_design', None)),
+            'Q_op_m3_s': _to_json_safe(_safe_get(locals_dict, 'Q_op', None)),
+            'Q_bep_m3_s': _to_json_safe(_safe_get(locals_dict, 'Q_bep', None)),
+            'total_head_design_m': _to_json_safe(_safe_get(locals_dict, 'total_head_design', None)),
+            'static_head_m': _to_json_safe(_safe_get(locals_dict, 'static_head', None)),
+            'velocity_m_s': _to_json_safe(_safe_get(locals_dict, 'V', None)),
+            'reynolds': _to_json_safe(_safe_get(locals_dict, 'Re', None)),
+        },
+        'diagnostics': {
+            'wear_rate_relative': _to_json_safe(_safe_get(locals_dict, 'wear_rate', None)),
+            'slurry_wear_mm_per_year': _to_json_safe(_safe_get(locals_dict, 'slurry_wear_mm_per_year', None)),
+            'erosion_score': _to_json_safe(_safe_get(locals_dict, 'erosion_score', None)),
+            'erosion_label': _to_json_safe(_safe_get(locals_dict, 'erosion_label', None)),
+            'head_loss_pct_from_clearance': _to_json_safe(_safe_get(locals_dict, 'head_loss_pct', None)),
+            'eff_loss_pct_from_clearance': _to_json_safe(_safe_get(locals_dict, 'eff_loss_pct', None)),
+            'remaining_life_years': _to_json_safe(_safe_get(locals_dict, 'years_left', None)),
+            'remaining_life_hours': _to_json_safe(_safe_get(locals_dict, 'hours_left', None)),
+            'vibration_severity': _to_json_safe(_safe_get(locals_dict, 'vibration_severity', None)),
+            'pulsation_risk': _to_json_safe(_safe_get(locals_dict, 'pulsation_risk', None)),
+            'seal_life_hours': _to_json_safe(_safe_get(locals_dict, 'seal_life_hours', None)),
+            'health_score': _to_json_safe(_safe_get(locals_dict, 'health_score', None)),
+        }
+    }
+    # Attach checklist
+    payload['api610_checklist'] = generate_api610_checklist(locals_dict)
+    return payload
 
 # --- Excel read helper (for future import/upload) ---
 def read_excel_helper(uploaded_file) -> pd.DataFrame:
@@ -442,8 +402,14 @@ if page == "Rotating Pumps (Centrifugal etc.)":
             mu_cP = st.number_input("Viscosity (cP)", value=1.0, min_value=0.01)
             if material_type == 'Slurry':
                 particle_size = st.number_input("Average particle size (mm)", value=0.0, min_value=0.0)
+                particle_conc = st.number_input("Particle concentration (wt%)", value=0.0, min_value=0.0)
+                impeller_thickness_mm = st.number_input("Impeller thickness (mm)", value=5.0, min_value=0.1)
+                measured_clearance_mm = st.number_input("Measured clearance (mm)", value=0.5, min_value=0.0)
             else:
                 particle_size = 0
+                particle_conc = 0.0
+                impeller_thickness_mm = 0.0
+                measured_clearance_mm = 0.0
             density = 1000.0 * SG
             density_range = suggest_density_range(material_type)
             if density_range[0] is not None:
@@ -490,11 +456,17 @@ if page == "Rotating Pumps (Centrifugal etc.)":
             show_affinity = st.checkbox("Analyze speed variations", value=True)
             show_wear_analysis = st.checkbox("Show wear analysis", value=True)
         with col6:
-            show_energy_cost = st.checkbox("Calculate energy costs", value=True)
-            if show_energy_cost:
-                # --- CHANGED DEFAULT COST AND UNIT ---
-                electricity_cost = st.number_input("Electricity cost (₹/kWh)", value=10.0, min_value=0.0) # Changed default and unit
-                operating_hours = st.number_input("Operating hours/year", value=8000.0, min_value=0.0)
+                show_energy_cost = st.checkbox("Calculate energy costs", value=True)
+                if show_energy_cost:
+                    # --- CHANGED DEFAULT COST AND UNIT ---
+                    electricity_cost = st.number_input("Electricity cost (₹/kWh)", value=10.0, min_value=0.0) # Changed default and unit
+                    operating_hours = st.number_input("Operating hours/year", value=8000.0, min_value=0.0)
+                # Allow user to choose the Colebrook iteration method used for friction factor
+                colebrook_method = st.selectbox(
+                    "Colebrook solver",
+                    ['Swamee-Jain (explicit)', 'Newton-Raphson', 'Bracketed (robust)'],
+                    index=2
+                )
         submitted = st.form_submit_button("🚀 Calculate", type="primary")
 
     if submitted:
@@ -516,7 +488,8 @@ if page == "Rotating Pumps (Centrifugal etc.)":
             D = D_inner / 1000.0
             V = velocity_from_flow(Q_m3s, D)
             Re = reynolds(density, V, D, mu)
-            f = colebrook_f(Re, D, eps_mm/1000.0)
+            # compute friction factor using selected method
+            f = colebrook_f(Re, D, eps_mm/1000.0, method=colebrook_method, tol=1e-8, max_iter=100)
             hf = darcy_head_loss(f, L_pipe, D, V)
             hm = minor_loss_head(K_fittings, V)
             static_head = elevation_out - elevation_in
@@ -588,17 +561,46 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                 power_op = shaft_kW
 
             pct_from_bep = abs((Q_op - Q_bep)/Q_bep) * 100.0 if Q_bep > 0 else np.nan
-
-            # Wear analysis
-            if show_wear_analysis:
-                wear_rate = estimate_wear_rate(material_type, V, particle_size)
-                estimated_service_life = 50000 / wear_rate  # hours
-
-            # Vibration and reliability analysis
+            # Vibration and reliability analysis (moved earlier so used by wear diagnostics)
             vibration_severity, vib_color = calculate_vibration_severity(V, Re, material_type)
             pulsation_risk, pulse_color = calculate_pressure_pulsation('Centrifugal', Q_op, Q_bep)
             seal_life_hours = estimate_seal_life(material_type, T, V)
             motor_rated_kW = electrical_kW * service_factor
+
+            # Wear analysis
+            if show_wear_analysis:
+                # Existing relative wear estimate
+                wear_rate = estimate_wear_rate(material_type, V, particle_size)
+
+                # Slurry-specific erosion estimate (mm/year)
+                if material_type == 'Slurry':
+                    slurry_wear_mm_per_year = slurry_erosion_rate(particle_conc, particle_size, V, hardness_ratio=1.0)
+                else:
+                    # convert relative wear_rate into heuristic mm/year (baseline 0.01 mm/yr)
+                    slurry_wear_mm_per_year = 0.01 * wear_rate
+
+                # Cavitation erosion risk
+                try:
+                    flow_dev_pct = pct_from_bep if 'pct_from_bep' in locals() and not np.isnan(pct_from_bep) else 0.0
+                except Exception:
+                    flow_dev_pct = 0.0
+                erosion_score, erosion_label, erosion_recommendation = cavitation_erosion_index(NPSHa, NPSHr_vendor if 'NPSHr_vendor' in locals() else 0.0, sigma, flow_dev_pct)
+
+                # Clearance growth and performance impact
+                # Use a nominal initial clearance (user could supply actual historical baseline)
+                initial_clearance_mm = 0.3 if impeller_thickness_mm <= 0 else max(0.1, impeller_thickness_mm * 0.05)
+                head_loss_pct, eff_loss_pct = clearance_to_performance_loss(initial_clearance_mm, measured_clearance_mm, geometry_factor=1.0)
+
+                # Remaining life estimate for impeller; guard operating_hours
+                op_hours = operating_hours if 'operating_hours' in locals() else 0.0
+                years_left, hours_left = remaining_life(impeller_thickness_mm, slurry_wear_mm_per_year, op_hours)
+
+                # Composite health score
+                pulsation_numeric = 1.0 if pulsation_risk == 'High' else (0.5 if pulsation_risk == 'Medium' else 0.0)
+                health_score = pump_health_score(vibration_severity, erosion_score, pulsation_numeric)
+
+                # Fallbacks for display variables
+                estimated_service_life = hours_left if not np.isinf(hours_left) else 50000
 
             # Display results
             st.success("✅ Calculation Complete")
@@ -701,9 +703,13 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                 with rec_col2:
                     if show_wear_analysis:
                         st.write(f"**Relative Wear Rate:** {wear_rate:.1f}x baseline")
-                        st.write(f"**Est. Service Life:** {estimated_service_life:.0f} hours")
-                        if wear_rate > 5:
-                            st.warning("⚠️ High wear expected. Consider hardened materials.")
+                        st.write(f"**Slurry Wear Estimate:** {slurry_wear_mm_per_year:.4f} mm/year")
+                        st.write(f"**Est. Service Life:** {estimated_service_life:.0f} hours ({years_left:.1f} years)")
+                        st.write(f"**Predicted Head Loss from Clearance:** {head_loss_pct:.1f}%")
+                        st.write(f"**Cavitation Erosion Risk:** {erosion_label} ({erosion_score:.2f})")
+                        st.write(f"**Pump Health Score:** {health_score:.0f}/100")
+                        if wear_rate > 5 or erosion_score > 0.66:
+                            st.warning("⚠️ High wear/erosion risk expected. Consider hardened materials or design changes.")
                     st.write(f"**Vibration Risk:** :{vib_color}[{vibration_severity}]")
                     st.write(f"**Pulsation Risk:** :{pulse_color}[{pulsation_risk}]")
                     st.write(f"**Seal Life Est.:** {seal_life_hours:.0f} hours")
@@ -870,7 +876,7 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                     d_m = d_test / 1000.0
                     v_test = velocity_from_flow(Q_design, d_m)
                     re_test = reynolds(density, v_test, d_m, mu)
-                    f_test = colebrook_f(re_test, d_m, eps_mm/1000.0)
+                    f_test = colebrook_f(re_test, d_m, eps_mm/1000.0, method=colebrook_method, tol=1e-8, max_iter=100)
                     hf_test = darcy_head_loss(f_test, L_pipe, d_m, v_test)
                     velocities.append(v_test)
                     head_losses.append(hf_test)
@@ -1027,6 +1033,7 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                         ax_cost1.plot(years, high_eff_cost/1000, 'g--', linewidth=2, marker='s', label='80% Efficient Pump')
                         ax_cost1.fill_between(years, high_eff_cost/1000, cumulative_cost/1000, alpha=0.3, color='green')
                     ax_cost1.set_xlabel('Years', fontweight='bold')
+                    # --- CHANGED CURRENCY ---
                     ax_cost1.set_ylabel('Cumulative Cost (₹1000s)', fontweight='bold') # Changed currency
                     ax_cost1.set_title('10-Year Energy Cost Projection', fontweight='bold')
                     ax_cost1.legend()
@@ -1122,6 +1129,58 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                     #     file_name=f"pump_sizing_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
                     #     mime="application/pdf"
                     # )
+
+                # Diagnostics export (CSV / JSON)
+                try:
+                    diagnostics_payload = prepare_diagnostics_payload(locals())
+                    json_bytes = json.dumps(diagnostics_payload, indent=2).encode('utf-8')
+                    # Flatten process + diagnostics for CSV
+                    csv_row = {}
+                    csv_row.update(diagnostics_payload.get('process', {}))
+                    csv_row.update(diagnostics_payload.get('diagnostics', {}))
+                    csv_df = pd.DataFrame([csv_row])
+                    csv_bytes = csv_df.to_csv(index=False).encode('utf-8')
+
+                    st.download_button(
+                        label="📥 Download Diagnostics (JSON)",
+                        data=json_bytes,
+                        file_name=f"pump_diagnostics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        mime="application/json"
+                    )
+                    st.download_button(
+                        label="📥 Download Diagnostics (CSV)",
+                        data=csv_bytes,
+                        file_name=f"pump_diagnostics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv"
+                    )
+                except Exception as _err:
+                    st.warning(f"Diagnostics export unavailable: {_err}")
+
+            with col_exp2:
+                try:
+                    diagnostics_payload = prepare_diagnostics_payload(locals())
+                    checklist = diagnostics_payload.get('api610_checklist', [])
+                    with st.expander("🛡️ API-610 Checklist", expanded=True):
+                        if checklist:
+                            df_chk = pd.DataFrame(checklist)
+                            st.dataframe(df_chk, use_container_width=True, hide_index=True)
+                            chk_csv = df_chk.to_csv(index=False).encode('utf-8')
+                            st.download_button(
+                                label="📥 Download Checklist CSV",
+                                data=chk_csv,
+                                file_name=f"api610_checklist_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                mime="text/csv"
+                            )
+                            st.download_button(
+                                label="📥 Download Checklist JSON",
+                                data=json.dumps(checklist, indent=2).encode('utf-8'),
+                                file_name=f"api610_checklist_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                                mime="application/json"
+                            )
+                        else:
+                            st.write("No checklist data available. Run analysis first.")
+                except Exception as _err:
+                    st.warning(f"Unable to build checklist: {_err}")
 
 
 
@@ -1399,7 +1458,12 @@ elif page == "Pump System Comparison":
     st.write("Compare multiple pump configurations side-by-side")
     st.info("Enter parameters for up to 3 different pump systems to compare")
     num_systems = st.slider("Number of systems to compare", 2, 3, 2)
-    comparison_data = []
+    
+    # --- CHANGED: Use st.session_state to persist comparison_data ---
+    if 'comparison_data' not in st.session_state:
+        st.session_state['comparison_data'] = []
+    comparison_data = st.session_state['comparison_data']
+
     cols = st.columns(num_systems)
     for i, col in enumerate(cols):
         with col:
@@ -1410,18 +1474,16 @@ elif page == "Pump System Comparison":
                 head = st.number_input("Head (m)", value=20.0+i*5)
                 efficiency = st.number_input("Efficiency (%)", value=70.0+i*3)
                 power = st.number_input("Power (kW)", value=10.0+i*2)
-                # --- CHANGED CURRENCY ---
-                cost = st.number_input("Capital Cost (₹)", value=5000.0*(i+1)) # Changed currency
+                cost = st.number_input("Capital Cost (₹)", value=5000.0*(i+1))
                 submitted = st.form_submit_button("Add")
                 if submitted:
-                    comparison_data.append({
+                    st.session_state['comparison_data'].append({
                         'Name': name,
                         'Flow (m³/h)': flow,
                         'Head (m)': head,
                         'Efficiency (%)': efficiency,
                         'Power (kW)': power,
-                        # --- CHANGED CURRENCY ---
-                        'Capital Cost (₹)': cost # Changed currency
+                        'Capital Cost (₹)': cost
                     })
 
     if len(comparison_data) >= 2:
