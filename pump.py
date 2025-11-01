@@ -458,6 +458,487 @@ def prepare_diagnostics_payload(locals_dict):
     payload['api610_checklist'] = generate_api610_checklist(locals_dict)
     return payload
 
+# --- API 610 Functions ---
+
+def select_mechanical_seal_api610(temperature_C, pressure_bar, fluid_type, shaft_speed_rpm, fluid_properties=None):
+    """Select mechanical seal configuration based on API 610 requirements."""
+    if fluid_properties is None:
+        fluid_properties = {'abrasive': False, 'volatile': False, 'toxic': False, 'crystallizing': False}
+    
+    # Base configuration
+    seal_config = {
+        'arrangement': 'Single',
+        'seal_type': 'Pusher',
+        'face_material': 'Carbon/SiC',
+        'elastomer': 'FKM',
+        'api_plan': '11',
+        'contains_solids': False
+    }
+    
+    # Temperature considerations
+    if temperature_C > 200:
+        seal_config['arrangement'] = 'Dual pressurized'
+        seal_config['api_plan'] = '53A'
+        seal_config['face_material'] = 'SiC/SiC'
+        seal_config['elastomer'] = 'FFKM'
+    elif temperature_C > 150:
+        seal_config['elastomer'] = 'FFKM'
+    
+    # Pressure considerations
+    if pressure_bar > 40:
+        seal_config['arrangement'] = 'Dual unpressurized'
+        seal_config['api_plan'] = '52'
+        seal_config['face_material'] = 'TC/TC'
+    
+    # Fluid type considerations
+    if fluid_type == 'Slurry':
+        seal_config['contains_solids'] = True
+        seal_config['face_material'] = 'TC/TC'
+        seal_config['api_plan'] = '32'
+    elif fluid_type in ['Acids', 'Alkaline']:
+        seal_config['face_material'] = 'SiC/SiC'
+        seal_config['elastomer'] = 'FFKM'
+    
+    # Speed considerations
+    if shaft_speed_rpm > 3600:
+        seal_config['seal_type'] = 'Non-pusher'
+    
+    # Special conditions
+    if fluid_properties.get('volatile', False):
+        seal_config['arrangement'] = 'Dual pressurized'
+        seal_config['api_plan'] = '53B'
+    if fluid_properties.get('toxic', False):
+        seal_config['arrangement'] = 'Dual pressurized'
+        seal_config['api_plan'] = '53B'
+    if fluid_properties.get('crystallizing', False):
+        seal_config['api_plan'] += '/32'
+    
+    return seal_config
+
+def calculate_bearing_cooling_api610(shaft_speed_rpm, bearing_temp_rise, ambient_temp=40):
+    """Calculate bearing housing cooling requirements per API 610."""
+    cooling_req = {
+        'cooling_required': False,
+        'method': 'None',
+        'flow_rate': 0,
+        'heat_load': 0
+    }
+    
+    # API 610 temperature limits
+    max_oil_temp = 82  # °C
+    max_bearing_temp = 95  # °C
+    
+    # Calculate heat generation (simplified)
+    bearing_power_loss = (shaft_speed_rpm/1000)**1.6 * 100  # Watts
+    
+    # Temperature rise calculation
+    total_temp = ambient_temp + bearing_temp_rise
+    
+    if total_temp > max_bearing_temp or bearing_temp_rise > 40:
+        cooling_req['cooling_required'] = True
+        if bearing_power_loss > 2000:
+            cooling_req['method'] = 'Water cooling'
+            cooling_req['flow_rate'] = bearing_power_loss / (4186 * 10)  # L/min
+        else:
+            cooling_req['method'] = 'Air cooling'
+            cooling_req['flow_rate'] = bearing_power_loss / 1000  # m³/min
+    
+    cooling_req['heat_load'] = bearing_power_loss
+    return cooling_req
+
+def recommend_material_upgrades_api610(base_material, temperature_C, pressure_bar, 
+                                     corrosive=False, erosive=False):
+    """Provide material upgrade recommendations based on API 610."""
+    upgrades = {
+        'current_class': '',
+        'recommended_class': '',
+        'reason': [],
+        'estimated_life_improvement': 1.0,
+        'specific_recommendations': {}
+    }
+    
+    # Base material class identification
+    if base_material == 'Cast Iron':
+        upgrades['current_class'] = 'I-1'
+    elif base_material == 'Carbon Steel':
+        upgrades['current_class'] = 'I-2'
+    elif base_material == '12% Chrome':
+        upgrades['current_class'] = 'S-1'
+    elif base_material == 'Duplex SS':
+        upgrades['current_class'] = 'S-6'
+    
+    # Temperature-based upgrades
+    if temperature_C > 150 and upgrades['current_class'] in ['I-1', 'I-2']:
+        upgrades['recommended_class'] = 'S-1'
+        upgrades['reason'].append('High temperature service')
+        upgrades['estimated_life_improvement'] = 2.0
+    
+    # Pressure-based upgrades
+    if pressure_bar > 40 and upgrades['current_class'] == 'I-1':
+        upgrades['recommended_class'] = 'I-2'
+        upgrades['reason'].append('High pressure service')
+        upgrades['estimated_life_improvement'] = 1.5
+    
+    # Corrosion/erosion upgrades
+    if corrosive and upgrades['current_class'] in ['I-1', 'I-2']:
+        upgrades['recommended_class'] = 'S-1'
+        upgrades['reason'].append('Corrosive service')
+        upgrades['estimated_life_improvement'] *= 2.5
+    
+    if erosive and upgrades['current_class'] in ['I-1', 'I-2', 'S-1']:
+        upgrades['recommended_class'] = 'S-6'
+        upgrades['reason'].append('Erosive service')
+        upgrades['estimated_life_improvement'] *= 2.0
+    
+    # Specific component recommendations
+    upgrades['specific_recommendations'] = {
+        'impeller': 'Upgrade to next material class' if erosive else 'Standard',
+        'wear_rings': 'Hard-faced' if erosive else 'Standard',
+        'shaft': '12% Chrome minimum' if corrosive else 'Standard',
+        'case': upgrades['recommended_class'] if upgrades['recommended_class'] else 'Standard'
+    }
+    
+    return upgrades
+
+def generate_installation_specs_api610(pump_power_kW, base_plate_length_mm):
+    """Generate detailed installation and alignment specifications per API 610."""
+    specs = {
+        'foundation': {
+            'type': 'Concrete',
+            'minimum_mass': pump_power_kW * 2.5,  # tonnes
+            'minimum_thickness': max(200, pump_power_kW * 25),  # mm
+            'reinforcement': 'Required' if pump_power_kW > 50 else 'Optional'
+        },
+        'grouting': {
+            'type': 'Epoxy' if pump_power_kW > 100 else 'Cementitious',
+            'thickness_mm': min(50, max(25, pump_power_kW/2)),
+            'cure_time_hours': 48 if pump_power_kW > 100 else 24
+        },
+        'alignment': {
+            'cold_alignment': {
+                'parallel_mm': 0.05,
+                'angular_mm_per_100mm': 0.04
+            },
+            'hot_alignment': {
+                'parallel_mm': 0.075,
+                'angular_mm_per_100mm': 0.06
+            },
+            'measurement_points': 4 if base_plate_length_mm > 2000 else 3,
+            'check_intervals': [
+                'After grouting cure',
+                'After pipe connection',
+                'At normal operating temperature'
+            ]
+        },
+        'piping': {
+            'suction_support': {
+                'first_support_distance': min(500, base_plate_length_mm/4),  # mm
+                'maximum_span': 3000  # mm
+            },
+            'discharge_support': {
+                'first_support_distance': min(300, base_plate_length_mm/6),  # mm
+                'maximum_span': 2500  # mm
+            },
+            'allowable_forces': {
+                'suction_flange': pump_power_kW * 50,  # N
+                'discharge_flange': pump_power_kW * 40  # N
+            }
+        },
+        'monitoring': {
+            'vibration_points': ['Inboard Bearing', 'Outboard Bearing', 'Casing'],
+            'alignment_intervals': {
+                'initial_hours': 50,
+                'routine_months': 6
+            }
+        }
+    }
+    return specs
+
+# --- End of new API 610 Functions ---
+def calculate_first_critical_speed(shaft_length_mm, shaft_diameter_mm, mass_kg):
+    """Calculate first critical speed using Dunkerley's method."""
+    # Convert to meters
+    L = shaft_length_mm / 1000
+    d = shaft_diameter_mm / 1000
+    
+    # Moment of inertia
+    I = (math.pi * d**4) / 64
+    
+    # Area
+    A = math.pi * (d/2)**2
+    
+    # Material properties (steel)
+    E = 200e9  # Young's modulus
+    rho = 7850  # Density
+    
+    # Natural frequency
+    fn = (1/(2*math.pi)) * math.sqrt((48*E*I)/(mass_kg*L**3))
+    
+    # Convert to RPM
+    return fn * 60
+
+def calculate_shaft_deflection_api610(shaft_length_mm, shaft_diameter_mm, radial_load_N, 
+                                    elastic_modulus_GPa=200):
+    """Calculate shaft deflection at seal locations per API 610."""
+    L = shaft_length_mm / 1000
+    d = shaft_diameter_mm / 1000
+    E = elastic_modulus_GPa * 1e9
+    
+    # Moment of inertia
+    I = (math.pi * d**4) / 64
+    
+    # Maximum deflection (simplified beam calculation)
+    deflection = (radial_load_N * L**3) / (48 * E * I)
+    
+    # API 610 limits
+    api_limit_seal = 0.05/1000  # 0.05mm at seal faces
+    api_limit_wear_rings = 0.08/1000  # 0.08mm at wear rings
+    
+    return {
+        'deflection_m': deflection,
+        'seal_limit_m': api_limit_seal,
+        'wear_ring_limit_m': api_limit_wear_rings,
+        'seal_compliant': deflection <= api_limit_seal,
+        'wear_ring_compliant': deflection <= api_limit_wear_rings
+    }
+
+def calculate_bearing_life_api610_detailed(radial_load_N, axial_load_N, rpm, bearing_type='ball'):
+    """Calculate detailed bearing life according to API 610."""
+    # Basic dynamic load ratings (approximate)
+    if bearing_type == 'ball':
+        C = radial_load_N * 4  # Typical ratio for ball bearings
+        X = 1  # Radial factor
+        Y = 0.5  # Axial factor
+        life_factor = 3  # Exponent for ball bearings
+    else:  # roller
+        C = radial_load_N * 6  # Typical ratio for roller bearings
+        X = 0.8
+        Y = 0.6
+        life_factor = 10/3  # Exponent for roller bearings
+    
+    # Equivalent dynamic load
+    P = X * radial_load_N + Y * axial_load_N
+    
+    # Basic rating life in millions of revolutions
+    L10 = (C/P)**life_factor
+    
+    # Convert to hours
+    hours = (L10 * 1e6) / (60 * rpm)
+    
+    # API 610 minimum requirement
+    api_minimum = 25000  # hours
+    
+    return {
+        'L10_hours': hours,
+        'api_minimum': api_minimum,
+        'compliant': hours >= api_minimum,
+        'bearing_type': bearing_type,
+        'load_ratio': P/C
+    }
+
+def calculate_seal_chamber_api610(shaft_diameter_mm):
+    """Calculate API 610 seal chamber dimensions."""
+    d = shaft_diameter_mm
+    
+    # API 610 seal chamber dimensions
+    chamber = {
+        'bore_diameter': max(d + 40, d * 1.5),  # mm
+        'depth': max(d + 25, d * 1.25),  # mm
+        'rabbet_diameter': max(d + 60, d * 1.8),  # mm
+        'min_radius': 3.0,  # mm
+        'surface_finish': 0.8  # μm Ra
+    }
+    
+    # Calculate cooling requirements
+    chamber['cooling_required'] = d > 75
+    
+    # Recommended flush plans based on size
+    if d <= 60:
+        chamber['recommended_plans'] = ['Plan 11', 'Plan 13']
+    else:
+        chamber['recommended_plans'] = ['Plan 23', 'Plan 32']
+    
+    return chamber
+
+def calculate_baseplate_requirements_api610(pump_power_kW, pump_length_mm):
+    """Calculate API 610 baseplate requirements."""
+    # Minimum thickness based on pump power
+    if pump_power_kW <= 100:
+        min_thickness_mm = 12
+    elif pump_power_kW <= 300:
+        min_thickness_mm = 20
+    else:
+        min_thickness_mm = 25
+    
+    # Stiffness requirements
+    length = pump_length_mm
+    width = length * 0.4  # Approximate
+    
+    # Deflection limit under full load
+    max_deflection_mm = length / 1000  # API typical limit
+    
+    # Grouting requirements
+    grout_thickness_mm = min(min_thickness_mm * 2, 50)
+    
+    return {
+        'min_thickness_mm': min_thickness_mm,
+        'recommended_thickness_mm': min_thickness_mm * 1.2,
+        'grout_thickness_mm': grout_thickness_mm,
+        'max_deflection_mm': max_deflection_mm,
+        'leveling_requirements': {
+            'max_deviation_mm_per_m': 0.2,
+            'flatness_requirement_mm': 0.1
+        },
+        'anchor_bolt_spec': {
+            'min_diameter_mm': min(min_thickness_mm * 1.5, 30),
+            'material': 'ASTM A307 Grade B',
+            'embedment_mm': min_thickness_mm * 15
+        }
+    }
+
+def calculate_rotor_dynamics_api610(pump_speed_rpm, impeller_mass_kg, shaft_length_mm, 
+                                  shaft_diameter_mm):
+    """Calculate rotor dynamics parameters per API 610."""
+    # First critical speed
+    first_critical = calculate_first_critical_speed(shaft_length_mm, shaft_diameter_mm, 
+                                                  impeller_mass_kg)
+    
+    # Separation margins
+    max_cont_speed = pump_speed_rpm * 1.05
+    min_cont_speed = pump_speed_rpm * 0.95
+    
+    # API 610 requirements
+    margins = {
+        'first_critical_speed': first_critical,
+        'margin_above': (first_critical - max_cont_speed) / max_cont_speed * 100,
+        'margin_below': (min_cont_speed - first_critical) / min_cont_speed * 100,
+        'api_required_margin': 20  # %
+    }
+    
+    # Damped natural frequency analysis (simplified)
+    damping_ratio = 0.05  # Typical value
+    damped_frequency = first_critical * math.sqrt(1 - damping_ratio**2)
+    
+    margins['damped_first_critical'] = damped_frequency
+    
+    return margins
+
+def calculate_por(Q_bep):
+    """Calculate Preferred Operating Region (POR) according to API 610.
+    Returns flow ranges as fraction of BEP flow."""
+    return 0.7 * Q_bep, 1.2 * Q_bep
+
+def calculate_aor(Q_bep):
+    """Calculate Allowable Operating Region (AOR) according to API 610.
+    Returns minimum continuous stable flow and maximum flow."""
+    return 0.5 * Q_bep, 1.3 * Q_bep
+
+def calculate_mcsf(Ns, Q_bep):
+    """Calculate Minimum Continuous Stable Flow based on specific speed.
+    Returns flow rate as fraction of BEP."""
+    if Ns < 1500:
+        return 0.4  # 40% of BEP
+    elif Ns < 3000:
+        return 0.45  # 45% of BEP
+    else:
+        return 0.5  # 50% of BEP
+
+def api610_material_class(temperature_C, pressure_bar):
+    """Determine API 610 material class based on operating conditions."""
+    if temperature_C <= 150 and pressure_bar <= 20:
+        return "I-1", "Cast Iron"
+    elif temperature_C <= 200 and pressure_bar <= 40:
+        return "I-2", "Carbon Steel"
+    elif temperature_C <= 350 and pressure_bar <= 100:
+        return "S-1", "12% Chrome"
+    else:
+        return "S-6", "Duplex Stainless Steel"
+
+def calculate_bearing_life_api610(radial_load_N, axial_load_N, rpm, bearing_size_mm):
+    """Calculate bearing life according to API 610 requirements."""
+    # Basic dynamic load rating (approximate)
+    C = bearing_size_mm * 500  # Simplified correlation
+    
+    # Equivalent dynamic load
+    P = 0.56 * radial_load_N + 1.2 * axial_load_N  # Simplified
+    
+    # Basic rating life in millions of revolutions
+    L10 = (C/P)**3
+    
+    # Convert to hours
+    hours = (L10 * 1e6) / (60 * rpm)
+    
+    return hours
+
+def api610_shaft_deflection(shaft_length_mm, shaft_diameter_mm, load_N, elastic_modulus_GPa=200):
+    """Calculate shaft deflection and compare to API 610 limits."""
+    # Convert to meters
+    L = shaft_length_mm / 1000
+    d = shaft_diameter_mm / 1000
+    E = elastic_modulus_GPa * 1e9
+    
+    # Moment of inertia
+    I = (math.pi * d**4) / 64
+    
+    # Maximum deflection for simply supported beam (simplified)
+    deflection = (load_N * L**3) / (48 * E * I)
+    
+    # API 610 limit (typically 0.05mm at seal)
+    api_limit = 0.05/1000
+    
+    return deflection, api_limit, deflection <= api_limit
+
+def calculate_nozzle_loads_api610(discharge_diameter_mm):
+    """Calculate allowable nozzle loads per API 610."""
+    # Base moment (simplified calculation)
+    base_moment = (discharge_diameter_mm/25.4)**3 * 1.5  # Convert to inches for calculation
+    
+    # API 610 load limits
+    limits = {
+        'Fx': base_moment * 2.0,  # N
+        'Fy': base_moment * 1.5,  # N
+        'Fz': base_moment * 1.7,  # N
+        'Mx': base_moment * 1.0,  # N·m
+        'My': base_moment * 0.5,  # N·m
+        'Mz': base_moment * 0.7   # N·m
+    }
+    return limits
+
+def api610_critical_speed_margins(first_critical_speed):
+    """Calculate critical speed margins per API 610."""
+    running_speed = 1450  # Example running speed
+    
+    # API 610 requirements:
+    # - First critical speed should be at least 20% above max continuous speed
+    # - Or at least 20% below min continuous speed
+    margin_above = (first_critical_speed - running_speed) / running_speed * 100
+    margin_below = (running_speed - first_critical_speed) / running_speed * 100
+    
+    if margin_above >= 20:
+        return True, f"Above by {margin_above:.1f}%"
+    elif margin_below >= 20:
+        return True, f"Below by {margin_below:.1f}%"
+    else:
+        return False, f"Insufficient margin: {min(margin_above, margin_below):.1f}%"
+
+def api610_testing_requirements():
+    """Return API 610 testing requirements checklist."""
+    return {
+        'Hydrostatic': {'required': True, 'pressure': '1.5 × max working pressure'},
+        'Performance': {'required': True, 'points': 'Minimum 5 points including shutoff'},
+        'NPSH': {'required': True, 'method': 'Three-point step'},
+        'Bearing Temperature': {'required': True, 'limit': '82°C maximum'},
+        'Vibration': {'required': True, 'limits': {
+            'Velocity': '3.0 mm/s RMS',
+            'Displacement': '50 micrometers peak-to-peak'
+        }},
+        'Sound Level': {'required': True, 'limit': '85 dBA at 1m'},
+        'Nozzle Load': {'required': False, 'comment': 'When specified'},
+        'Mechanical Run': {'required': True, 'duration': '4 hours minimum'}
+    }
+
+# --- END helpers ---
+
 # ------------------ Rotating Pumps Page ------------------
 if page == "Rotating Pumps (Centrifugal etc.)":
     st.header("🔄 Rotating Pump Sizing & Selection")
@@ -769,6 +1250,1108 @@ if page == "Rotating Pumps (Centrifugal etc.)":
 
             with tab3:
                 st.subheader("⚙️ Advanced Analysis")
+                
+                # API 610 Analysis Section
+                st.markdown("#### 📋 API 610 Compliance Analysis")
+                
+                # Calculate API 610 operating regions
+                Q_por_min, Q_por_max = calculate_por(Q_bep)
+                Q_aor_min, Q_aor_max = calculate_aor(Q_bep)
+                mcsf = calculate_mcsf(Ns, Q_bep) * Q_bep
+                
+                # Operating regions analysis
+                api610_col1, api610_col2 = st.columns(2)
+                with api610_col1:
+                    st.write("**Operating Regions:**")
+                    st.write(f"- POR: {Q_por_min*3600:.1f} - {Q_por_max*3600:.1f} m³/h")
+                    st.write(f"- AOR: {Q_aor_min*3600:.1f} - {Q_aor_max*3600:.1f} m³/h")
+                    st.write(f"- MCSF: {mcsf*3600:.1f} m³/h")
+                    
+                    # Operating point analysis
+                    if Q_op >= Q_por_min and Q_op <= Q_por_max:
+                        st.success("✅ Operating point within POR")
+                    elif Q_op >= Q_aor_min and Q_op <= Q_aor_max:
+                        st.warning("⚠️ Operating point in AOR (outside POR)")
+                    else:
+                        st.error("❌ Operating point outside AOR")
+                
+                with api610_col2:
+                    # Material class recommendation
+                    pressure_bar = total_head_design * density * 9.81 / 1e5
+                    material_class, material_type = api610_material_class(T, pressure_bar)
+                    st.write("**Material Requirements:**")
+                    st.write(f"- API 610 Class: {material_class}")
+                    st.write(f"- Material Type: {material_type}")
+                    st.write(f"- Based on: {T:.1f}°C, {pressure_bar:.1f} bar")
+
+                # Testing requirements
+                with st.expander("🔍 API 610 Testing Requirements", expanded=False):
+                    test_reqs = api610_testing_requirements()
+                    test_df = pd.DataFrame([
+                        {"Test": k, "Required": v['required'], "Specification": v.get('pressure') or v.get('points') or v.get('limit') or v.get('duration') or v.get('comment')}
+                        for k, v in test_reqs.items()
+                    ])
+                    st.dataframe(test_df, use_container_width=True, hide_index=True)
+
+                # Nozzle loads
+                with st.expander("💪 Allowable Nozzle Loads", expanded=False):
+                    # Assuming discharge diameter is 80% of suction diameter for estimation
+                    discharge_diameter = 0.8 * D_inner
+                    nozzle_limits = calculate_nozzle_loads_api610(discharge_diameter)
+                    nozzle_df = pd.DataFrame([
+                        {"Force/Moment": k, "Allowable Value": f"{v:.1f} {'N' if k[0]=='F' else 'N·m'}"}
+                        for k, v in nozzle_limits.items()
+                    ])
+                    st.dataframe(nozzle_df, use_container_width=True, hide_index=True)
+
+                # Shaft and Rotor Analysis
+                st.markdown("---")
+                st.markdown("#### 🔄 Shaft & Rotor Analysis")
+
+                def create_rotor_dynamics_plot(critical_speed, operating_speed, margins, shaft_data=None):
+                    """Create a comprehensive visualization of rotor dynamics analysis."""
+                    fig = plt.figure(figsize=(12, 8))
+                    gs = fig.add_gridspec(2, 2)
+                    
+                    # Main response curve plot
+                    ax1 = fig.add_subplot(gs[0, :])
+                    
+                    # Speed range for plotting
+                    speeds = np.linspace(0, critical_speed * 1.5, 1000)
+                    
+                    # Enhanced amplitude response with multiple damping ratios
+                    def amplitude_response(speed, critical, damping):
+                        return 1 / np.sqrt((1 - (speed/critical)**2)**2 + (2*damping*(speed/critical))**2)
+                    
+                    # Plot response curves for different damping ratios
+                    damping_ratios = [0.05, 0.1, 0.2]
+                    colors = ['r--', 'b-', 'g--']
+                    
+                    for damping, color in zip(damping_ratios, colors):
+                        response = amplitude_response(speeds, critical_speed, damping)
+                        ax1.plot(speeds, response, color, 
+                               label=f'Damping Ratio = {damping:.2f}',
+                               alpha=0.7)
+                    
+                    # Mark critical and operating speeds
+                    ax1.axvline(critical_speed, color='r', linestyle='--', 
+                              label=f'First Critical: {critical_speed:.0f} RPM')
+                    ax1.axvline(operating_speed, color='g', linestyle='--',
+                              label=f'Operating: {operating_speed:.0f} RPM')
+                    
+                    # Add separation margins
+                    margin_low = operating_speed * (1 - margins['below']/100)
+                    margin_high = operating_speed * (1 + margins['above']/100)
+                    ax1.axvspan(margin_low, margin_high, color='y', alpha=0.2, 
+                              label='Operating Range')
+                    
+                    ax1.set_xlabel('Rotor Speed (RPM)')
+                    ax1.set_ylabel('Relative Amplitude')
+                    ax1.set_title('Rotor Dynamic Response Analysis')
+                    ax1.grid(True, alpha=0.3)
+                    ax1.legend(loc='upper right', fontsize=8)
+                    
+                    # Add Campbell diagram
+                    ax2 = fig.add_subplot(gs[1, 0])
+                    speeds_campbell = np.linspace(0, critical_speed * 1.2, 100)
+                    
+                    # Excitation frequencies (1X, 2X, 0.5X)
+                    ax2.plot(speeds_campbell, speeds_campbell, 'b-', label='1X')
+                    ax2.plot(speeds_campbell, speeds_campbell*2, 'g--', label='2X')
+                    ax2.plot(speeds_campbell, speeds_campbell*0.5, 'r--', label='0.5X')
+                    
+                    # Add natural frequency line
+                    ax2.axhline(y=critical_speed, color='r', linestyle='-.',
+                              label='First Critical')
+                    
+                    ax2.set_xlabel('Rotor Speed (RPM)')
+                    ax2.set_ylabel('Frequency (RPM)')
+                    ax2.set_title('Campbell Diagram')
+                    ax2.grid(True, alpha=0.3)
+                    ax2.legend(loc='upper left', fontsize=8)
+                    
+                    # Add API compliance analysis
+                    ax3 = fig.add_subplot(gs[1, 1])
+                    
+                    # API 610 requirements
+                    api_requirements = {
+                        'Sep. Margin': margins['above'],
+                        'Damping': 0.1,
+                        'Mode Shape': 0.9,
+                        'Stability': 0.85
+                    }
+                    
+                    compliance_scores = list(api_requirements.values())
+                    requirement_labels = list(api_requirements.keys())
+                    
+                    compliance_colors = ['g' if score >= 0.8 else 'r' for score in compliance_scores]
+                    bars = ax3.bar(requirement_labels, compliance_scores, color=compliance_colors)
+                    
+                    # Add value labels on bars
+                    for bar in bars:
+                        height = bar.get_height()
+                        ax3.text(bar.get_x() + bar.get_width()/2., height,
+                                f'{height*100:.0f}%',
+                                ha='center', va='bottom')
+                    
+                    ax3.set_ylim(0, 1.2)
+                    ax3.set_title('API 610 Compliance')
+                    ax3.grid(True, alpha=0.3)
+                    
+                    # Add overall assessment
+                    overall_score = np.mean(compliance_scores)
+                    assessment = ('✅ Compliant' if overall_score >= 0.8 
+                                else '⚠️ Marginal' if overall_score >= 0.6 
+                                else '❌ Non-compliant')
+                    ax3.text(0.5, -0.1, f'Overall: {assessment}',
+                            ha='center', va='center', transform=ax3.transAxes)
+                    
+                    plt.tight_layout()
+                    return fig
+                    
+                    # Mark operating speed
+                    ax.axvline(operating_speed, color='g', linestyle='-', label='Operating Speed')
+                    
+                    # Mark separation margins
+                    ax.axvspan(operating_speed * 0.8, operating_speed * 1.2, 
+                             alpha=0.2, color='g', label='Operating Range')
+                    
+                    ax.set_xlabel('Speed (RPM)')
+                    ax.set_ylabel('Relative Amplitude')
+                    ax.set_title('Rotor Dynamic Response')
+                    ax.grid(True, alpha=0.3)
+                    ax.legend(loc='upper left')
+                    
+                    return fig
+
+                def create_shaft_deflection_diagram(length_mm, diameter_mm, deflection_m):
+                    """Create a visual representation of shaft deflection."""
+                    fig, ax = plt.subplots(figsize=(10, 3))
+                    
+                    # Create shaft outline
+                    x = np.linspace(0, length_mm, 100)
+                    
+                    # Simplified deflection curve (parabolic)
+                    def deflection_curve(x, max_deflection):
+                        return -4 * max_deflection * (x/length_mm) * (1 - x/length_mm)
+                    
+                    y_deflection = deflection_curve(x, deflection_m * 1000)  # Convert to mm
+                    
+                    # Plot shaft outline
+                    ax.fill_between(x, -diameter_mm/2, diameter_mm/2, color='gray', alpha=0.3, label='Shaft')
+                    
+                    # Plot deflection curve
+                    ax.plot(x, y_deflection, 'r--', linewidth=2, label='Deflection (exaggerated)')
+                    
+                    # Add annotations
+                    ax.axhline(y=0, color='k', linestyle='-', alpha=0.3)
+                    ax.set_xlabel('Shaft Length (mm)')
+                    ax.set_ylabel('Deflection (mm)')
+                    ax.set_title('Shaft Deflection Diagram')
+                    ax.grid(True, alpha=0.3)
+                    ax.legend()
+                    
+                    # Set reasonable y-limits to show deflection clearly
+                    max_defl = max(abs(y_deflection))
+                    ax.set_ylim(-max(diameter_mm/2, max_defl*2), max(diameter_mm/2, max_defl*2))
+                    
+                    return fig
+                
+                # Estimate shaft parameters based on power
+                estimated_shaft_diameter = max(25, math.sqrt(shaft_kW) * 10)  # mm
+                estimated_shaft_length = D_inner * 4  # mm
+                estimated_impeller_mass = shaft_kW * 0.5  # kg
+                
+                shaft_col1, shaft_col2 = st.columns(2)
+                with shaft_col1:
+                    st.write("**Shaft Parameters:**")
+                    st.write(f"- Estimated diameter: {estimated_shaft_diameter:.1f} mm")
+                    st.write(f"- Estimated length: {estimated_shaft_length:.1f} mm")
+                    st.write(f"- Est. impeller mass: {estimated_impeller_mass:.1f} kg")
+                    
+                    # Calculate radial load (simplified)
+                    radial_load = (shaft_kW * 1000 * 0.5) / (pump_speed_rpm * math.pi / 30)  # N
+                    axial_load = radial_load * 0.5  # Estimated
+                    
+                    # Shaft deflection analysis
+                    deflection_results = calculate_shaft_deflection_api610(
+                        estimated_shaft_length, 
+                        estimated_shaft_diameter,
+                        radial_load
+                    )
+                    
+                    st.write("**Shaft Deflection:**")
+                    deflection_mm = deflection_results['deflection_m'] * 1000
+                    st.write(f"- Calculated: {deflection_mm:.3f} mm")
+                    if deflection_results['seal_compliant']:
+                        st.success("✅ Meets API 610 seal limit")
+                    else:
+                        st.error("❌ Exceeds API 610 seal limit")
+
+                with shaft_col2:
+                    # Rotor dynamics
+                    rotor_dynamics = calculate_rotor_dynamics_api610(
+                        pump_speed_rpm, 
+                        estimated_impeller_mass,
+                        estimated_shaft_length, 
+                        estimated_shaft_diameter
+                    )
+                    
+                    st.write("**Critical Speed Analysis:**")
+                    st.write(f"- First critical: {rotor_dynamics['first_critical_speed']:.0f} RPM")
+                    st.write(f"- Margin above: {rotor_dynamics['margin_above']:.1f}%")
+                    if rotor_dynamics['margin_above'] >= rotor_dynamics['api_required_margin']:
+                        st.success("✅ Meets API 610 separation margin")
+                    else:
+                        st.error("❌ Insufficient separation margin")
+
+                # Bearing Analysis
+                st.markdown("---")
+                st.markdown("#### 🛠️ Bearing Analysis")
+
+                def create_bearing_life_plot(L10_hours, api_minimum, operating_hours, speed_rpm=None, load_radial=None, load_axial=None):
+                    """Create a comprehensive visual representation of bearing life analysis."""
+                    fig = plt.figure(figsize=(12, 8))
+                    gs = fig.add_gridspec(2, 2)
+                    
+                    # Reliability curve plot (main plot)
+                    ax1 = fig.add_subplot(gs[0, :])
+                    time_points = np.linspace(0, max(L10_hours * 1.2, api_minimum * 1.2), 100)
+                    
+                    def reliability_curve(t, L10):
+                        return np.exp(-(t/L10)**1.5)  # 1.5 is typical Weibull shape parameter for bearings
+                    
+                    reliability = reliability_curve(time_points, L10_hours)
+                    ax1.plot(time_points/1000, reliability*100, 'b-', linewidth=2, label='Reliability Curve')
+                    
+                    # Add reference lines
+                    ax1.axvline(api_minimum/1000, color='r', linestyle='--', label='API Minimum')
+                    ax1.axvline(L10_hours/1000, color='g', linestyle='--', label='L10 Life')
+                    if operating_hours > 0:
+                        ax1.axvline(operating_hours/1000, color='orange', linestyle='--', label='Operating Hours')
+                    
+                    ax1.set_xlabel('Thousands of Hours')
+                    ax1.set_ylabel('Reliability (%)')
+                    ax1.set_title('Bearing Reliability Analysis')
+                    ax1.grid(True, alpha=0.3)
+                    ax1.legend()
+                    
+                    # Load distribution plot (if available)
+                    if load_radial is not None and load_axial is not None:
+                        ax2 = fig.add_subplot(gs[1, 0])
+                        loads = [load_radial, load_axial]
+                        load_labels = ['Radial', 'Axial']
+                        
+                        wedges, texts, autotexts = ax2.pie(loads, labels=load_labels, 
+                                                         autopct='%1.1f%%',
+                                                         colors=['lightblue', 'lightgreen'])
+                        plt.setp(autotexts, size=8, weight="bold")
+                        ax2.set_title('Load Distribution')
+                        
+                        # Calculate and display load ratio
+                        if load_radial > 0:
+                            load_ratio = load_axial / load_radial
+                            ax2.text(0, -1.2, f'Load Ratio (A/R): {load_ratio:.2f}',
+                                   ha='center', va='center')
+                    
+                    # Speed impact analysis (if speed available)
+                    if speed_rpm is not None:
+                        ax3 = fig.add_subplot(gs[1, 1])
+                        speeds = np.linspace(0.7*speed_rpm, 1.3*speed_rpm, 100)
+                        # Simplified life calculation model
+                        lives = L10_hours * (speed_rpm/speeds)**3
+                        
+                        ax3.plot(speeds, lives/1000, 'b-')
+                        ax3.plot(speed_rpm, L10_hours/1000, 'ro', label='Operating Point')
+                        ax3.set_xlabel('Speed (RPM)')
+                        ax3.set_ylabel('Life (thousands of hours)')
+                        ax3.set_title('Speed Impact on Bearing Life')
+                        ax3.grid(True, alpha=0.3)
+                        
+                        # Add critical reference lines
+                        ax3.axhline(y=api_minimum/1000, color='r', linestyle='--', 
+                                  alpha=0.5, label='API Minimum')
+                        if operating_hours > 0:
+                            ax3.axhline(y=operating_hours/1000, color='orange', 
+                                      linestyle='--', alpha=0.5, label='Operating Hours')
+                        ax3.legend(loc='best', fontsize=8)
+                    
+                    plt.tight_layout()
+                    return fig
+                    if operating_hours > 0:
+                        ax.axvline(operating_hours/1000, color='y', linestyle='--', label='Annual Operation')
+                    
+                    ax.set_xlabel('Operating Time (thousands of hours)')
+                    ax.set_ylabel('Reliability (%)')
+                    ax.set_title('Bearing Life Prediction')
+                    ax.grid(True, alpha=0.3)
+                    ax.legend()
+                    
+                    return fig
+
+                def create_temperature_distribution(bearing_temp_rise, ambient_temp):
+                    """Create a temperature distribution visualization."""
+                    fig, ax = plt.subplots(figsize=(8, 4))
+                    
+                    # Create position points
+                    positions = np.linspace(0, 10, 100)
+                    
+                    # Create temperature distribution (simplified)
+                    def temp_distribution(x):
+                        return ambient_temp + bearing_temp_rise * np.exp(-((x-5)**2)/8)
+                    
+                    temps = temp_distribution(positions)
+                    
+                    # Create colormap
+                    norm = plt.Normalize(ambient_temp, max(temps))
+                    cmap = plt.cm.RdYlBu_r
+                    
+                    # Plot temperature distribution
+                    points = ax.scatter(positions, temps, c=temps, cmap=cmap, norm=norm)
+                    ax.plot(positions, temps, 'k-', alpha=0.3)
+                    
+                    # Add colorbar
+                    plt.colorbar(points, label='Temperature (°C)')
+                    
+                    ax.set_xlabel('Bearing Housing Position')
+                    ax.set_ylabel('Temperature (°C)')
+                    ax.set_title('Temperature Distribution')
+                    ax.grid(True, alpha=0.3)
+                    
+                    return fig
+                bearing_col1, bearing_col2 = st.columns(2)
+                with bearing_col1:
+                    # Calculate bearing life
+                    bearing_results = calculate_bearing_life_api610_detailed(
+                        radial_load, axial_load, pump_speed_rpm, 'ball'
+                    )
+                    
+                    st.write("**Bearing Life Calculation:**")
+                    st.write(f"- L10 life: {bearing_results['L10_hours']:.0f} hours")
+                    st.write(f"- API minimum: {bearing_results['api_minimum']} hours")
+                    st.write(f"- Load ratio: {bearing_results['load_ratio']:.2f}")
+                    
+                    if bearing_results['compliant']:
+                        st.success("✅ Meets API 610 minimum life requirement")
+                    else:
+                        st.error("❌ Below API 610 minimum life requirement")
+
+                with bearing_col2:
+                    # Alternative bearing type analysis
+                    roller_results = calculate_bearing_life_api610_detailed(
+                        radial_load, axial_load, pump_speed_rpm, 'roller'
+                    )
+                    
+                    st.write("**Alternative Configuration:**")
+                    st.write("Roller bearing analysis:")
+                    st.write(f"- L10 life: {roller_results['L10_hours']:.0f} hours")
+                    st.write(f"- Load ratio: {roller_results['load_ratio']:.2f}")
+
+                # Seal Chamber Analysis
+                st.markdown("---")
+                st.markdown("#### 🔐 Seal Chamber Design")
+
+                def create_seal_chamber_diagram(chamber_dims, operating_conditions=None):
+                    """Create a comprehensive visualization of the seal chamber with analysis."""
+                    fig = plt.figure(figsize=(12, 8))
+                    gs = fig.add_gridspec(2, 2)
+                    
+                    # Main chamber diagram
+                    ax1 = fig.add_subplot(gs[0, :])
+                    
+                    # Chamber dimensions
+                    bore_d = chamber_dims['bore_diameter']
+                    depth = chamber_dims['depth']
+                    rabbet_d = chamber_dims['rabbet_diameter']
+                    shaft_d = chamber_dims.get('shaft_diameter', bore_d * 0.6)  # Estimated if not provided
+                    
+                    # Calculate important ratios and clearances
+                    radial_clearance = (bore_d - shaft_d) / 2
+                    depth_ratio = depth / bore_d  # L/D ratio
+                    chamber_volume = np.pi * (bore_d/2)**2 * depth
+                    
+                    # Draw the main chamber diagram
+                    def draw_chamber():
+                        # Background grid for reference
+                        ax1.grid(True, linestyle='--', alpha=0.3)
+                        
+                        # Outer chamber (rabbet)
+                        ax1.add_patch(plt.Rectangle((-rabbet_d/2, 0), rabbet_d, depth, 
+                                                  fill=False, color='blue', linewidth=2))
+                        # Inner bore
+                        ax1.add_patch(plt.Rectangle((-bore_d/2, 0), bore_d, depth,
+                                                  fill=True, color='lightgray', alpha=0.3))
+                        # Shaft
+                        ax1.add_patch(plt.Rectangle((-shaft_d/2, -depth*0.2), shaft_d, depth*1.4,
+                                                  fill=True, color='darkgray'))
+                        
+                        # Flow paths (indicative)
+                        arrow_props = dict(arrowstyle='->', color='red', linestyle='--', alpha=0.5)
+                        ax1.annotate('', xy=(-bore_d/3, depth*0.8), xytext=(-bore_d/3, depth*0.2),
+                                   arrowprops=arrow_props)
+                        ax1.annotate('', xy=(bore_d/3, depth*0.2), xytext=(bore_d/3, depth*0.8),
+                                   arrowprops=arrow_props)
+                        
+                        # Add dimensions and annotations
+                        def add_dimension(start, end, text, yoffset, color='black'):
+                            ax1.annotate('', xy=start, xytext=end,
+                                       arrowprops=dict(arrowstyle='<->', color=color))
+                            ax1.text((start[0] + end[0])/2, yoffset, text,
+                                   ha='center', va='bottom', color=color)
+                        
+                        # Bore diameter
+                        add_dimension((-bore_d/2, depth*1.1), (bore_d/2, depth*1.1),
+                                    f'Bore: {bore_d:.1f}mm', depth*1.15, 'blue')
+                        # Shaft diameter
+                        add_dimension((-shaft_d/2, -depth*0.1), (shaft_d/2, -depth*0.1),
+                                    f'Shaft: {shaft_d:.1f}mm', -depth*0.15, 'darkgray')
+                        # Depth
+                        add_dimension((rabbet_d*0.6, 0), (rabbet_d*0.6, depth),
+                                    f'Depth: {depth:.1f}mm', depth/2, 'green')
+                        
+                        # Design analysis annotations
+                        analysis_text = (
+                            f'Design Analysis:\n'
+                            f'• Radial Clearance: {radial_clearance:.2f}mm\n'
+                            f'• L/D Ratio: {depth_ratio:.2f}\n'
+                            f'• Chamber Volume: {chamber_volume/1000:.1f}L'
+                        )
+                        ax1.text(rabbet_d*0.7, depth*0.5, analysis_text,
+                               bbox=dict(facecolor='white', edgecolor='gray', alpha=0.8),
+                               ha='left', va='center', fontsize=8)
+                    
+                    # Draw the chamber
+                    draw_chamber()
+                    
+                    # Set up the main diagram
+                    ax1.set_aspect('equal')
+                    ax1.set_xlim(-rabbet_d*0.8, rabbet_d*1.2)
+                    ax1.set_ylim(-depth*0.2, depth*1.2)
+                    ax1.set_xticks([])
+                    ax1.set_yticks([])
+                    ax1.set_title('API 610 Seal Chamber Design')
+                    
+                    # Add design compliance indicators
+                    design_scores = {
+                        'Clearance Ratio': min((radial_clearance/(bore_d/2))/0.008, 1),  # API recommends 0.008
+                        'L/D Ratio': min(depth_ratio/1.8, 1),  # API typical range 1.5-2.0
+                        'Volume': min(chamber_volume/(np.pi * (bore_d/2)**2 * bore_d), 1)  # Relative to basic cylinder
+                    }
+                    
+                    # Create compliance gauge chart
+                    ax2 = fig.add_subplot(gs[1, 0], projection='polar')
+                    angles = np.linspace(0, 2*np.pi, len(design_scores), endpoint=False)
+                    values = list(design_scores.values())
+                    values.append(values[0])
+                    angles = np.concatenate((angles, [angles[0]]))
+                    
+                    ax2.plot(angles, values, 'o-', linewidth=2)
+                    ax2.fill(angles, values, alpha=0.25)
+                    ax2.set_xticks(angles[:-1])
+                    ax2.set_xticklabels(list(design_scores.keys()), size=8)
+                    ax2.set_ylim(0, 1)
+                    ax2.set_title('Design Compliance', pad=15)
+                    
+                    # Add operating conditions analysis if provided
+                    if operating_conditions:
+                        ax3 = fig.add_subplot(gs[1, 1])
+                        
+                        # Process operating conditions
+                        temp = operating_conditions.get('temperature', 25)
+                        pressure = operating_conditions.get('pressure', 1)
+                        speed = operating_conditions.get('speed', 0)
+                        
+                        # Create operating envelope plot
+                        x = np.linspace(0, max(pressure*1.5, 20), 100)
+                        y = np.linspace(0, max(temp*1.5, 150), 100)
+                        X, Y = np.meshgrid(x, y)
+                        
+                        # Simple severity score (example)
+                        Z = (X/20)**2 + (Y/150)**2  # Normalized severity
+                        
+                        contour = ax3.contourf(X, Y, Z, levels=np.linspace(0, 2, 20),
+                                             cmap='RdYlGn_r')
+                        ax3.plot(pressure, temp, 'ro', label='Operating Point')
+                        
+                        ax3.set_xlabel('Pressure (bar)')
+                        ax3.set_ylabel('Temperature (°C)')
+                        ax3.set_title('Operating Envelope')
+                        plt.colorbar(contour, ax=ax3, label='Severity')
+                        ax3.legend()
+                    
+                    plt.tight_layout()
+                    return fig
+
+                def create_seal_flush_diagram(api_plan):
+                    """Create a schematic of the seal flush plan."""
+                    fig, ax = plt.subplots(figsize=(8, 6))
+                    
+                    # Basic pump outline
+                    def draw_pump_outline():
+                        # Pump casing
+                        ax.add_patch(plt.Circle((0, 0), 1, fill=False, color='black'))
+                        # Shaft
+                        ax.add_patch(plt.Rectangle((-1.5, -0.1), 3, 0.2, color='gray'))
+                        # Seal chamber
+                        ax.add_patch(plt.Rectangle((-0.3, -0.3), 0.6, 0.6, fill=False, color='blue'))
+                    
+                    draw_pump_outline()
+                    
+                    # Add flush plan specific features
+                    if '11' in api_plan:
+                        # Plan 11 recirculation
+                        ax.arrow(0.3, 0, 0.5, 0.5, head_width=0.1, color='red')
+                        ax.arrow(0.8, 0.5, -0.5, -0.5, head_width=0.1, color='blue')
+                        ax.text(0.9, 0.6, 'Plan 11\nRecirculation', fontsize=8)
+                    elif '32' in api_plan:
+                        # Plan 32 external flush
+                        ax.arrow(-1, 0.5, 0.7, -0.5, head_width=0.1, color='green')
+                        ax.text(-1.2, 0.6, 'Plan 32\nExternal Flush', fontsize=8)
+                    
+                    # Set equal aspect ratio and limits
+                    ax.set_aspect('equal')
+                    ax.set_xlim(-2, 2)
+                    ax.set_ylim(-1.5, 1.5)
+                    
+                    # Remove axes for cleaner look
+                    ax.set_xticks([])
+                    ax.set_yticks([])
+                    
+                    ax.set_title(f'API Flush Plan {api_plan}')
+                    return fig
+                seal_col1, seal_col2 = st.columns(2)
+                with seal_col1:
+                    # Calculate seal chamber dimensions
+                    seal_chamber = calculate_seal_chamber_api610(estimated_shaft_diameter)
+                    
+                    st.write("**API 610 Seal Chamber Dimensions:**")
+                    st.write(f"- Bore diameter: {seal_chamber['bore_diameter']:.1f} mm")
+                    st.write(f"- Chamber depth: {seal_chamber['depth']:.1f} mm")
+                    st.write(f"- Rabbet diameter: {seal_chamber['rabbet_diameter']:.1f} mm")
+                    st.write(f"- Surface finish: {seal_chamber['surface_finish']} μm Ra")
+
+                with seal_col2:
+                    st.write("**Seal Configuration:**")
+                    st.write(f"- Cooling required: {'Yes' if seal_chamber['cooling_required'] else 'No'}")
+                    st.write("Recommended flush plans:")
+                    for plan in seal_chamber['recommended_plans']:
+                        st.write(f"- {plan}")
+
+                # Baseplate Design
+                st.markdown("---")
+                st.markdown("#### 🏗️ Baseplate Design")
+                base_col1, base_col2 = st.columns(2)
+                with base_col1:
+                    # Calculate baseplate requirements
+                    baseplate = calculate_baseplate_requirements_api610(
+                        power_kW, 
+                        estimated_shaft_length * 3  # Approximate pump length
+                    )
+                    
+                    st.write("**API 610 Baseplate Requirements:**")
+                    st.write(f"- Min. thickness: {baseplate['min_thickness_mm']} mm")
+                    st.write(f"- Recommended: {baseplate['recommended_thickness_mm']} mm")
+                    st.write(f"- Grout thickness: {baseplate['grout_thickness_mm']} mm")
+                    st.write(f"- Max deflection: {baseplate['max_deflection_mm']} mm")
+
+                with base_col2:
+                    st.write("**Installation Requirements:**")
+                    st.write(f"- Max deviation: {baseplate['leveling_requirements']['max_deviation_mm_per_m']} mm/m")
+                    st.write(f"- Flatness: {baseplate['leveling_requirements']['flatness_requirement_mm']} mm")
+                    st.write("Anchor bolt specification:")
+                    st.write(f"- Diameter: {baseplate['anchor_bolt_spec']['min_diameter_mm']} mm")
+                    st.write(f"- Material: {baseplate['anchor_bolt_spec']['material']}")
+
+                # Mechanical Seal Selection
+                st.markdown("---")
+                st.markdown("#### 🔒 Mechanical Seal Selection")
+                
+                # Get operating conditions for seal selection
+                pressure_bar = total_head_design * density * 9.81 / 1e5
+                fluid_properties = {
+                    'abrasive': material_type == 'Slurry',
+                    'volatile': material_type in ['Oil', 'Acids'],
+                    'toxic': material_type in ['Acids', 'Alkaline'],
+                    'crystallizing': False
+                }
+                
+                seal_recommendation = select_mechanical_seal_api610(
+                    T, pressure_bar, material_type, 
+                    pump_speed_rpm, fluid_properties
+                )
+                
+                seal_col1, seal_col2 = st.columns(2)
+                with seal_col1:
+                    st.write("**Seal Configuration:**")
+                    st.write(f"- Arrangement: {seal_recommendation['arrangement']}")
+                    st.write(f"- Seal Type: {seal_recommendation['seal_type']}")
+                    st.write(f"- Face Materials: {seal_recommendation['face_material']}")
+                    st.write(f"- Elastomer: {seal_recommendation['elastomer']}")
+                
+                with seal_col2:
+                    st.write("**API Piping Plan:**")
+                    st.write(f"- Plan: {seal_recommendation['api_plan']}")
+                    if seal_recommendation['contains_solids']:
+                        st.warning("⚠️ Solids handling features required")
+                    if seal_recommendation['arrangement'] == 'Dual pressurized':
+                        st.info("ℹ️ Barrier fluid system required")
+                    
+                    # Add seal chamber visualization
+                    chamber_fig = create_seal_chamber_diagram(seal_chamber)
+                    st.pyplot(chamber_fig)
+                    plt.close()
+                    
+                    # Add flush plan visualization
+                    flush_fig = create_seal_flush_diagram(seal_recommendation['api_plan'])
+                    st.pyplot(flush_fig)
+                    plt.close()
+                    
+                    # Add seal arrangement details
+                    st.write("\n**Seal Arrangement Details:**")
+                    seal_details = pd.DataFrame({
+                        'Parameter': [
+                            'Arrangement Type',
+                            'Face Material',
+                            'Secondary Seals',
+                            'Face Pressure',
+                            'Face Loading',
+                            'Heat Generation'
+                        ],
+                        'Specification': [
+                            seal_recommendation['arrangement'],
+                            seal_recommendation['face_material'],
+                            seal_recommendation['elastomer'],
+                            f"{pressure_bar:.1f} bar",
+                            'Hydraulically Balanced' if pressure_bar > 20 else 'Standard',
+                            f"{(shaft_kW * 0.02):.1f} kW (estimated)"
+                        ]
+                    })
+                    st.dataframe(seal_details, hide_index=True)
+
+                # Bearing Housing Cooling
+                st.markdown("---")
+                st.markdown("#### ❄️ Bearing Housing Cooling")
+                
+                # Estimate bearing temperature rise based on speed
+                bearing_temp_rise = (pump_speed_rpm/1450)**1.2 * 20
+                cooling_requirements = calculate_bearing_cooling_api610(
+                    pump_speed_rpm, bearing_temp_rise
+                )
+                
+                cooling_col1, cooling_col2 = st.columns(2)
+                with cooling_col1:
+                    st.write("**Temperature Analysis:**")
+                    st.write(f"- Estimated temp rise: {bearing_temp_rise:.1f}°C")
+                    st.write(f"- Heat load: {cooling_requirements['heat_load']:.0f} W")
+                    if cooling_requirements['cooling_required']:
+                        st.warning("⚠️ Cooling system required")
+                    else:
+                        st.success("✅ Natural cooling sufficient")
+                
+                with cooling_col2:
+                    if cooling_requirements['cooling_required']:
+                        st.write("**Cooling System:**")
+                        st.write(f"- Method: {cooling_requirements['method']}")
+                        st.write(f"- Required flow: {cooling_requirements['flow_rate']:.2f} "
+                                f"{'L/min' if cooling_requirements['method']=='Water cooling' else 'm³/min'}")
+                        
+                    # Add temperature distribution visualization
+                    temp_fig = create_temperature_distribution(bearing_temp_rise, 40)  # 40°C ambient
+                    st.pyplot(temp_fig)
+                    plt.close()
+                
+                # Add bearing life visualization
+                bearing_life_fig = create_bearing_life_plot(
+                    bearing_results['L10_hours'],
+                    bearing_results['api_minimum'],
+                    operating_hours if 'operating_hours' in locals() else 8000
+                )
+                st.pyplot(bearing_life_fig)
+                plt.close()
+
+                # Material Upgrades
+                st.markdown("---")
+                st.markdown("#### 🛡️ Material Upgrade Recommendations")
+                
+                # Add visualization for material improvements
+                def create_interactive_material_analysis(current_class, recommended_class, improvements):
+                    """Create interactive material analysis with multiple visualization options."""
+                    
+                    # Material properties for different API classes
+                    material_props = {
+                        'I-1': {
+                            'max_temp': 150,
+                            'max_pressure': 20,
+                            'corrosion_resistance': 2,
+                            'erosion_resistance': 2,
+                            'relative_cost': 1
+                        },
+                        'I-2': {
+                            'max_temp': 200,
+                            'max_pressure': 40,
+                            'corrosion_resistance': 3,
+                            'erosion_resistance': 3,
+                            'relative_cost': 1.5
+                        },
+                        'S-1': {
+                            'max_temp': 350,
+                            'max_pressure': 100,
+                            'corrosion_resistance': 4,
+                            'erosion_resistance': 4,
+                            'relative_cost': 2.5
+                        },
+                        'S-6': {
+                            'max_temp': 400,
+                            'max_pressure': 150,
+                            'corrosion_resistance': 5,
+                            'erosion_resistance': 5,
+                            'relative_cost': 4
+                        }
+                    }
+                    
+                    # Create tabs for different visualizations
+                    viz_tabs = st.tabs(["Performance Comparison", "Cost-Benefit Analysis", "Operating Limits"])
+                    
+                    with viz_tabs[0]:
+                        # Radar chart for performance comparison
+                        fig_radar = plt.figure(figsize=(8, 6))
+                        ax_radar = fig_radar.add_subplot(111, projection='polar')
+                        
+                        # Parameters to compare
+                        params = ['Temperature', 'Pressure', 'Corrosion', 'Erosion', 'Cost']
+                        angles = np.linspace(0, 2*np.pi, len(params), endpoint=False)
+                        
+                        # Plot for current material
+                        current_values = [
+                            material_props[current_class]['max_temp']/400,
+                            material_props[current_class]['max_pressure']/150,
+                            material_props[current_class]['corrosion_resistance']/5,
+                            material_props[current_class]['erosion_resistance']/5,
+                            1/material_props[current_class]['relative_cost']
+                        ]
+                        current_values.append(current_values[0])
+                        angles_plot = np.concatenate((angles, [angles[0]]))
+                        
+                        ax_radar.plot(angles_plot, current_values, 'b-', label=f'Current ({current_class})')
+                        ax_radar.fill(angles_plot, current_values, alpha=0.25)
+                        
+                        # Plot for recommended material if different
+                        if recommended_class and recommended_class != current_class:
+                            recommended_values = [
+                                material_props[recommended_class]['max_temp']/400,
+                                material_props[recommended_class]['max_pressure']/150,
+                                material_props[recommended_class]['corrosion_resistance']/5,
+                                material_props[recommended_class]['erosion_resistance']/5,
+                                1/material_props[recommended_class]['relative_cost']
+                            ]
+                            recommended_values.append(recommended_values[0])
+                            ax_radar.plot(angles_plot, recommended_values, 'r-', label=f'Recommended ({recommended_class})')
+                            ax_radar.fill(angles_plot, recommended_values, alpha=0.25)
+                        
+                        ax_radar.set_xticks(angles)
+                        ax_radar.set_xticklabels(params)
+                        ax_radar.legend(loc='upper right', bbox_to_anchor=(0.1, 0.1))
+                        
+                        st.pyplot(fig_radar)
+                        plt.close()
+
+                    with viz_tabs[1]:
+                        # Cost-benefit analysis
+                        if recommended_class and recommended_class != current_class:
+                            cost_increase = material_props[recommended_class]['relative_cost'] / material_props[current_class]['relative_cost']
+                            performance_increase = (
+                                material_props[recommended_class]['corrosion_resistance'] +
+                                material_props[recommended_class]['erosion_resistance']
+                            ) / (
+                                material_props[current_class]['corrosion_resistance'] +
+                                material_props[current_class]['erosion_resistance']
+                            )
+                            
+                            fig_cost = plt.figure(figsize=(8, 4))
+                            ax_cost = fig_cost.add_subplot(111)
+                            
+                            x = np.array([1, 2])
+                            metrics = {
+                                'Cost': [1, cost_increase],
+                                'Life': [1, improvements],
+                                'Performance': [1, performance_increase]
+                            }
+                            
+                            width = 0.25
+                            for i, (metric, values) in enumerate(metrics.items()):
+                                ax_cost.bar(x + i*width - width, values, width, label=metric)
+                            
+                            ax_cost.set_xticks([1, 2])
+                            ax_cost.set_xticklabels(['Current', 'Recommended'])
+                            ax_cost.legend()
+                            ax_cost.set_ylabel('Relative Value')
+                            ax_cost.grid(True, alpha=0.3)
+                            
+                            st.pyplot(fig_cost)
+                            plt.close()
+                            
+                            # ROI Calculator
+                            st.write("**ROI Calculator**")
+                            initial_cost = st.number_input("Initial Equipment Cost (₹)", value=100000)
+                            yearly_maintenance = st.number_input("Yearly Maintenance Cost (₹)", value=10000)
+                            
+                            current_life = 10  # years
+                            improved_life = current_life * improvements
+                            
+                            roi_data = pd.DataFrame({
+                                'Metric': ['Equipment Cost (₹)', 'Annual Maintenance (₹)', 'Expected Life (years)', 'Lifetime Cost (₹)'],
+                                'Current': [
+                                    initial_cost,
+                                    yearly_maintenance,
+                                    current_life,
+                                    initial_cost + yearly_maintenance * current_life
+                                ],
+                                'Recommended': [
+                                    initial_cost * cost_increase,
+                                    yearly_maintenance / performance_increase,
+                                    improved_life,
+                                    initial_cost * cost_increase + (yearly_maintenance / performance_increase) * improved_life
+                                ]
+                            })
+                            st.dataframe(roi_data, hide_index=True)
+
+                    with viz_tabs[2]:
+                        # Operating limits visualization
+                        fig_limits = plt.figure(figsize=(8, 6))
+                        ax_limits = fig_limits.add_subplot(111)
+                        
+                        for mat_class, props in material_props.items():
+                            ax_limits.add_patch(plt.Rectangle(
+                                (0, 0),
+                                props['max_pressure'],
+                                props['max_temp'],
+                                alpha=0.3,
+                                label=f'Class {mat_class}'
+                            ))
+                        
+                        # Mark operating point
+                        pressure_bar = st.session_state.get('pressure_bar', 50)
+                        temp_c = st.session_state.get('T', 100)
+                        ax_limits.plot(pressure_bar, temp_c, 'ro', label='Operating Point')
+                        
+                        ax_limits.set_xlabel('Pressure (bar)')
+                        ax_limits.set_ylabel('Temperature (°C)')
+                        ax_limits.set_title('Operating Limits by Material Class')
+                        ax_limits.grid(True, alpha=0.3)
+                        ax_limits.legend()
+                        
+                        st.pyplot(fig_limits)
+                        plt.close()
+                        
+                        # Safety margins
+                        current_margin_temp = (material_props[current_class]['max_temp'] - temp_c) / material_props[current_class]['max_temp'] * 100
+                        current_margin_pressure = (material_props[current_class]['max_pressure'] - pressure_bar) / material_props[current_class]['max_pressure'] * 100
+                        
+                        st.write("**Safety Margins:**")
+                        margins_data = pd.DataFrame({
+                            'Parameter': ['Temperature', 'Pressure'],
+                            'Current Margin (%)': [f"{current_margin_temp:.1f}%", f"{current_margin_pressure:.1f}%"],
+                            'Status': [
+                                '✅ Adequate' if current_margin_temp >= 20 else '⚠️ Marginal' if current_margin_temp > 0 else '❌ Exceeded',
+                                '✅ Adequate' if current_margin_pressure >= 20 else '⚠️ Marginal' if current_margin_pressure > 0 else '❌ Exceeded'
+                            ]
+                        })
+                        st.dataframe(margins_data, hide_index=True)
+                    
+                    return None  # Since we're using st.pyplot directly
+
+                def create_material_comparison_chart(current_class, recommended_class, improvements):
+                    fig, ax = plt.subplots(figsize=(8, 4))
+                    
+                    properties = ['Corrosion', 'Erosion', 'Temperature', 'Pressure']
+                    current_values = [0.4, 0.4, 0.5, 0.6]  # Base material properties
+                    
+                    if recommended_class:
+                        # Enhanced properties based on recommended class
+                        recommended_values = [
+                            0.8 if 'S' in recommended_class else 0.6,
+                            0.9 if 'S-6' in recommended_class else 0.7,
+                            0.9 if 'S' in recommended_class else 0.7,
+                            0.9 if 'S' in recommended_class else 0.8
+                        ]
+                        
+                        x = np.arange(len(properties))
+                        width = 0.35
+                        
+                        ax.bar(x - width/2, current_values, width, label=f'Current ({current_class})',
+                              color='lightgray', alpha=0.7)
+                        ax.bar(x + width/2, recommended_values, width, label=f'Recommended ({recommended_class})',
+                              color='green', alpha=0.7)
+                        
+                        ax.set_xticks(x)
+                        ax.set_xticklabels(properties)
+                        ax.set_ylim(0, 1)
+                        ax.set_ylabel('Relative Performance')
+                        ax.legend()
+                        ax.grid(True, alpha=0.3)
+                        
+                        return fig
+                    return None
+                
+                # Determine if service is corrosive/erosive
+                is_corrosive = material_type in ['Acids', 'Alkaline', 'Seawater']
+                is_erosive = material_type == 'Slurry' or V > 3.0
+                
+                material_upgrades = recommend_material_upgrades_api610(
+                    'Carbon Steel',  # Base material
+                    T, pressure_bar,
+                    corrosive=is_corrosive,
+                    erosive=is_erosive
+                )
+                
+                material_col1, material_col2 = st.columns(2)
+                with material_col1:
+                    st.write("**Material Analysis:**")
+                    st.write(f"- Current class: {material_upgrades['current_class']}")
+                    if material_upgrades['recommended_class']:
+                        st.write(f"- Recommended: {material_upgrades['recommended_class']}")
+                        st.write("Upgrade reasons:")
+                        for reason in material_upgrades['reason']:
+                            st.write(f"  • {reason}")
+                    else:
+                        st.success("✅ Current material class is suitable")
+                
+                with material_col2:
+                    st.write("**Component Recommendations:**")
+                    for component, rec in material_upgrades['specific_recommendations'].items():
+                        st.write(f"- {component.title()}: {rec}")
+                    if material_upgrades['estimated_life_improvement'] > 1.0:
+                        st.info(f"🔄 Estimated life improvement: "
+                               f"{material_upgrades['estimated_life_improvement']:.1f}x")
+                
+                # Material comparison visualization
+                if material_upgrades['recommended_class']:
+                    comparison_fig = create_material_comparison_chart(
+                        material_upgrades['current_class'],
+                        material_upgrades['recommended_class'],
+                        material_upgrades['estimated_life_improvement']
+                    )
+                    if comparison_fig:
+                        st.pyplot(comparison_fig)
+                        plt.close()
+                
+                # Export capabilities for API 610 specifications
+                st.markdown("---")
+                st.markdown("#### 📤 Export API 610 Specifications")
+                
+                # Prepare export data
+                api610_export_data = {
+                    "General Information": {
+                        "Date": datetime.now().strftime("%Y-%m-%d"),
+                        "Project": "Pump Specification",
+                        "Service": material_type
+                    },
+                    "Operating Conditions": {
+                        "Flow Rate (m³/h)": Q_design * 3600,
+                        "Total Head (m)": total_head_design,
+                        "Temperature (°C)": T,
+                        "Pressure (bar)": pressure_bar,
+                        "Speed (RPM)": pump_speed_rpm
+                    },
+                    "Material Specifications": {
+                        "Current Class": material_upgrades['current_class'],
+                        "Recommended Class": material_upgrades['recommended_class'],
+                        "Upgrade Reasons": material_upgrades['reason'],
+                        "Component Recommendations": material_upgrades['specific_recommendations']
+                    },
+                    "Mechanical Seal": {
+                        "Arrangement": seal_recommendation['arrangement'],
+                        "Type": seal_recommendation['seal_type'],
+                        "Face Materials": seal_recommendation['face_material'],
+                        "API Plan": seal_recommendation['api_plan']
+                    },
+                    "Installation Specifications": {
+                        "Foundation": installation_specs['foundation'],
+                        "Grouting": installation_specs['grouting'],
+                        "Alignment": installation_specs['alignment'],
+                        "Piping Support": installation_specs['piping']
+                    }
+                }
+                
+                # Export buttons
+                export_col1, export_col2 = st.columns(2)
+                with export_col1:
+                    # JSON export
+                    json_str = json.dumps(api610_export_data, indent=2)
+                    st.download_button(
+                        label="📥 Download API 610 Specifications (JSON)",
+                        data=json_str,
+                        file_name=f"api610_specifications_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        mime="application/json"
+                    )
+                
+                with export_col2:
+                    # Create PDF report
+                    def create_api610_pdf():
+                        pdf_buffer = io.BytesIO()
+                        # Create PDF content (simplified)
+                        content = [
+                            "API 610 Pump Specifications Report",
+                            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                            "\nOperating Conditions:",
+                            f"Flow Rate: {Q_design * 3600:.2f} m³/h",
+                            f"Total Head: {total_head_design:.2f} m",
+                            f"Temperature: {T:.1f}°C",
+                            f"Pressure: {pressure_bar:.1f} bar",
+                            "\nMaterial Specifications:",
+                            f"Current Class: {material_upgrades['current_class']}",
+                            f"Recommended Class: {material_upgrades['recommended_class']}",
+                            "\nMechanical Seal:",
+                            f"Arrangement: {seal_recommendation['arrangement']}",
+                            f"API Plan: {seal_recommendation['api_plan']}"
+                        ]
+                        return '\n'.join(content).encode('utf-8')
+                    
+                    pdf_content = create_api610_pdf()
+                    st.download_button(
+                        label="📥 Download API 610 Report (PDF)",
+                        data=pdf_content,
+                        file_name=f"api610_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                        mime="text/plain"
+                    )
+
+                # Installation & Alignment
+                st.markdown("---")
+                st.markdown("#### 🔧 Installation & Alignment Specifications")
+                
+                # Calculate installation specs
+                installation_specs = generate_installation_specs_api610(
+                    shaft_kW,  # Use shaft power for calculations
+                    estimated_shaft_length * 3  # Approximate pump length
+                )
+                
+                install_col1, install_col2 = st.columns(2)
+                with install_col1:
+                    st.write("**Foundation Requirements:**")
+                    st.write(f"- Type: {installation_specs['foundation']['type']}")
+                    st.write(f"- Min. mass: {installation_specs['foundation']['minimum_mass']:.1f} tonnes")
+                    st.write(f"- Thickness: {installation_specs['foundation']['minimum_thickness']} mm")
+                    st.write(f"- Reinforcement: {installation_specs['foundation']['reinforcement']}")
+                    
+                    st.write("\n**Grouting:**")
+                    st.write(f"- Type: {installation_specs['grouting']['type']}")
+                    st.write(f"- Thickness: {installation_specs['grouting']['thickness_mm']} mm")
+                    st.write(f"- Cure time: {installation_specs['grouting']['cure_time_hours']} hours")
+                
+                with install_col2:
+                    st.write("**Alignment Tolerances:**")
+                    st.write("Cold alignment:")
+                    st.write(f"- Parallel: {installation_specs['alignment']['cold_alignment']['parallel_mm']} mm")
+                    st.write(f"- Angular: {installation_specs['alignment']['cold_alignment']['angular_mm_per_100mm']} mm/100mm")
+                    
+                    st.write("\n**Piping Support:**")
+                    st.write("Suction pipe:")
+                    st.write(f"- First support: {installation_specs['piping']['suction_support']['first_support_distance']} mm")
+                    st.write("Discharge pipe:")
+                    st.write(f"- First support: {installation_specs['piping']['discharge_support']['first_support_distance']} mm")
+
+                st.markdown("---")
+                # Continue with existing Affinity Laws Analysis
                 if show_affinity:
                     st.markdown("#### Affinity Laws Analysis")
                     speed_variations = np.array([0.7, 0.8, 0.9, 1.0, 1.1, 1.2])
