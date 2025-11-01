@@ -1844,7 +1844,7 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                 with base_col1:
                     # Calculate baseplate requirements
                     baseplate = calculate_baseplate_requirements_api610(
-                        power_kW, 
+                        shaft_kW,
                         estimated_shaft_length * 3  # Approximate pump length
                     )
                     
