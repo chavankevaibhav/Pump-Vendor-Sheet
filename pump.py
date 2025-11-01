@@ -19,6 +19,42 @@ page = st.sidebar.selectbox("Choose tool", [
 ])
 
 # ------------------ Helper functions ------------------
+def prepare_diagnostics_payload(context):
+    """Prepare a structured diagnostics payload from calculation context."""
+    try:
+        payload = {
+            'timestamp': datetime.now().isoformat(),
+            'process': {
+                'flow_design': context['Q_design'] * 3600 if context['Q_design'] else None,  # Convert to m³/h
+                'flow_operating': context['Q_op'] * 3600 if context['Q_op'] else None,
+                'flow_bep': context['Q_bep'] * 3600 if context['Q_bep'] else None,
+                'head_design': context['total_head_design'],
+                'static_head': context['static_head'],
+                'fluid_velocity': context['V'],
+                'reynolds_number': context['Re'],
+            },
+            'diagnostics': {
+                'wear_rate': context['wear_rate'],
+                'wear_per_year': context['slurry_wear_mm_per_year'],
+                'erosion_score': context['erosion_score'],
+                'erosion_severity': context['erosion_label'],
+                'head_loss_percent': context['head_loss_pct'],
+                'efficiency_loss_percent': context['eff_loss_pct'],
+                'remaining_years': context['years_left'],
+                'remaining_hours': context['hours_left'],
+                'vibration_severity': context['vibration_severity'],
+                'pulsation_risk': context['pulsation_risk'],
+                'seal_life_hours': context['seal_life_hours'],
+                'health_score': context['health_score'],
+                'percent_from_bep': context['pct_from_bep'],
+                'npsha': context['NPSHa'],
+                'npshr': context['NPSHr_vendor']
+            }
+        }
+        return {k: v for k, v in payload.items() if v is not None}
+    except Exception as e:
+        raise ValueError(f"Failed to prepare diagnostics payload: {str(e)}")
+
 def colebrook_newton(Re, eps_abs, D, tol=1e-12, maxiter=50):
     """Solve Colebrook for friction factor f using Newton-Raphson."""
     if Re <= 0 or D <= 0:
@@ -1063,6 +1099,13 @@ if page == "Rotating Pumps (Centrifugal etc.)":
 
             pump_eff = pump_eff_user
             shaft_kW, electrical_kW = pump_power_required(density, 9.81, Q_design, total_head_design, pump_eff, motor_eff)
+            
+            # Generate installation specs early since we have shaft_kW
+            estimated_shaft_length = math.sqrt(shaft_kW) * 0.3  # Approximate correlation
+            installation_specs = generate_installation_specs_api610(
+                shaft_kW,
+                estimated_shaft_length * 3  # Approximate pump length
+            )
 
             # NPSH calculations
             P_atm_Pa = atm_pressure_kPa * 1000.0
@@ -1216,6 +1259,35 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                     st.write(f"**Vibration Risk:** :{vib_color}[{vibration_severity}]")
                     st.write(f"**Pulsation Risk:** :{pulse_color}[{pulsation_risk}]")
                     st.write(f"**Seal Life Est.:** {seal_life_hours:.0f} hours")
+
+            # Store calculation context
+            calc_context = {
+                # Process
+                'Q_design': Q_design,
+                'Q_op': Q_op,
+                'Q_bep': Q_bep,
+                'total_head_design': total_head_design,
+                'static_head': static_head,
+                'V': V,
+                'Re': Re,
+
+                # Diagnostics
+                'wear_rate': wear_rate if show_wear_analysis else None,
+                'slurry_wear_mm_per_year': slurry_wear_mm_per_year if show_wear_analysis else None,
+                'erosion_score': erosion_score if show_wear_analysis else None,
+                'erosion_label': erosion_label if show_wear_analysis else None,
+                'head_loss_pct': head_loss_pct if show_wear_analysis else None,
+                'eff_loss_pct': eff_loss_pct if show_wear_analysis else None,
+                'years_left': years_left if show_wear_analysis else None,
+                'hours_left': hours_left if show_wear_analysis else None,
+                'vibration_severity': vibration_severity,
+                'pulsation_risk': pulsation_risk,
+                'seal_life_hours': seal_life_hours,
+                'health_score': health_score if show_wear_analysis else None,
+                'pct_from_bep': pct_from_bep,
+                'NPSHa': NPSHa,
+                'NPSHr_vendor': NPSHr_vendor,
+            }
 
             with tab2:
                 st.subheader("Performance Curves")
@@ -1961,10 +2033,11 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                     plt.close()
                 
                 # Add bearing life visualization
+                op_hours_for_plot = operating_hours if show_energy_cost else 8000.0
                 bearing_life_fig = create_bearing_life_plot(
                     bearing_results['L10_hours'],
                     bearing_results['api_minimum'],
-                    operating_hours if 'operating_hours' in locals() else 8000
+                    op_hours_for_plot
                 )
                 st.pyplot(bearing_life_fig)
                 plt.close()
@@ -2319,11 +2392,7 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                 st.markdown("---")
                 st.markdown("#### 🔧 Installation & Alignment Specifications")
                 
-                # Calculate installation specs
-                installation_specs = generate_installation_specs_api610(
-                    shaft_kW,  # Use shaft power for calculations
-                    estimated_shaft_length * 3  # Approximate pump length
-                )
+                # Installation specs have been calculated earlier
                 
                 install_col1, install_col2 = st.columns(2)
                 with install_col1:
@@ -2399,7 +2468,7 @@ if page == "Rotating Pumps (Centrifugal etc.)":
             col_exp1, col_exp2 = st.columns(2)
             with col_exp1:
                 try:
-                    diagnostics_payload = prepare_diagnostics_payload(locals())
+                    diagnostics_payload = prepare_diagnostics_payload(calc_context)
                     json_bytes = json.dumps(diagnostics_payload, indent=2).encode('utf-8')
                     csv_row = {}
                     csv_row.update(diagnostics_payload.get('process', {}))
@@ -2418,7 +2487,7 @@ if page == "Rotating Pumps (Centrifugal etc.)":
 
             with col_exp2:
                 try:
-                    diagnostics_payload = prepare_diagnostics_payload(locals())
+                    diagnostics_payload = prepare_diagnostics_payload(calc_context)
                     checklist = diagnostics_payload.get('api610_checklist', [])
                     with st.expander("🛡️ API-610 Checklist", expanded=True):
                         if checklist:
