@@ -3,6 +3,9 @@ import pandas as pd
 import numpy as np
 import math
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
 import io
 import json
 from datetime import datetime
@@ -10,6 +13,29 @@ from datetime import datetime
 # Set page config at the very top
 st.set_page_config(page_title="Advanced Pump & Vacuum Sizing", layout="wide")
 st.title("🔧 Advanced Pump & Vacuum Pump Sizing Sheet — Vendor Ready")
+
+# --- Enhanced UI controls (Auto-update, presets, form helper) ---
+auto_update = st.sidebar.checkbox("Auto-update (real-time recalculation)", value=True)
+
+def maybe_form(key: str):
+    """Return a context manager: st (immediate) or st.form(key) when auto_update is off."""
+    if auto_update:
+        return st
+    return st.form(key)
+
+# Presets for quick configuration
+PRESETS = {
+    'Custom': {},
+    'Small Water Transfer': {
+        'Q_input': 10.0, 'Q_unit': 'm³/h', 'T': 25.0, 'material_type': 'Water', 'D_inner': 50.0, 'L_pipe': 10.0
+    },
+    'Seawater Cooling (Medium)': {
+        'Q_input': 200.0, 'Q_unit': 'm³/h', 'T': 35.0, 'material_type': 'Seawater', 'D_inner': 150.0, 'L_pipe': 30.0
+    },
+    'Slurry - Pilot Plant': {
+        'Q_input': 50.0, 'Q_unit': 'm³/h', 'T': 30.0, 'material_type': 'Slurry', 'D_inner': 100.0, 'L_pipe': 15.0
+    }
+}
 
 # Simple navigation between pages
 page = st.sidebar.selectbox("Choose tool", [
@@ -163,6 +189,7 @@ def colebrook_brent_like(Re, eps_abs, D, tol=1e-12, maxiter=100):
     raise RuntimeError(f"Bracketed solver did not converge after {maxiter} iterations; last candidate={candidate}")
 
 
+@st.cache_data
 def colebrook_f(Re, D, eps_abs, method='brent', tol=1e-6, max_iter=100):
     """Unified Colebrook friction-factor solver."""
     if Re <= 0 or D <= 0:
@@ -235,6 +262,7 @@ def calculate_suction_specific_speed(N, Q, NPSHr):
         return np.nan
     return N * math.sqrt(Q*3600) / (NPSHr**0.75)
 
+@st.cache_data
 def generate_pump_curves(Q_design, H_design, H_static):
     """Generate pump and system curves"""
     Q_points = np.linspace(0, Q_design * 1.5, 50)
@@ -978,16 +1006,33 @@ def api610_testing_requirements():
 # ------------------ Rotating Pumps Page ------------------
 if page == "Rotating Pumps (Centrifugal etc.)":
     st.header("🔄 Rotating Pump Sizing & Selection")
-    with st.form(key='rotating'):
+    form_ctx = maybe_form('rotating')
+    with form_ctx:
+        # Presets selector
+        preset_choice = st.selectbox("Presets", list(PRESETS.keys()), index=0)
+        preset_defaults = PRESETS.get(preset_choice, {})
+
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Process & Fluid Data")
-            Q_input = st.number_input("Flow rate", value=100.0, min_value=0.0, format="%.6f")
-            Q_unit = st.selectbox("Flow unit", ['m³/h', 'L/s', 'm³/s', 'm³/d', 'GPM (US)'], index=0)
-            T = st.number_input("Fluid temperature (°C)", value=25.0)
-            material_type = st.selectbox("Fluid type", ['Water', 'Seawater', 'Acids', 'Alkaline', 'Slurry', 'Food-grade', 'Oil', 'More'])
-            SG = st.number_input("Specific gravity", value=1.0, min_value=0.01)
-            mu_cP = st.number_input("Viscosity (cP)", value=1.0, min_value=0.01)
+            Q_input = st.number_input("Flow rate", value=preset_defaults.get('Q_input', 100.0), min_value=0.0, format="%.6f")
+            units_list = ['m³/h', 'L/s', 'm³/s', 'm³/d', 'GPM (US)']
+            default_unit = preset_defaults.get('Q_unit', 'm³/h')
+            try:
+                default_unit_idx = units_list.index(default_unit)
+            except Exception:
+                default_unit_idx = 0
+            Q_unit = st.selectbox("Flow unit", units_list, index=default_unit_idx)
+            T = st.number_input("Fluid temperature (°C)", value=preset_defaults.get('T', 25.0))
+            material_options = ['Water', 'Seawater', 'Acids', 'Alkaline', 'Slurry', 'Food-grade', 'Oil', 'More']
+            default_mat = preset_defaults.get('material_type', 'Water')
+            try:
+                mat_idx = material_options.index(default_mat)
+            except Exception:
+                mat_idx = 0
+            material_type = st.selectbox("Fluid type", material_options, index=mat_idx)
+            SG = st.number_input("Specific gravity", value=1.0 if 'SG' not in preset_defaults else preset_defaults.get('SG', 1.0), min_value=0.01)
+            mu_cP = st.number_input("Viscosity (cP)", value=preset_defaults.get('mu_cP', 1.0), min_value=0.01)
             if material_type == 'Slurry':
                 particle_size = st.number_input("Average particle size (mm)", value=0.0, min_value=0.0)
                 particle_conc = st.number_input("Particle concentration (wt%)", value=0.0, min_value=0.0)
@@ -1007,8 +1052,8 @@ if page == "Rotating Pumps (Centrifugal etc.)":
             st.write(f"**Calculated Density:** {density:.2f} kg/m³")
         with col2:
             st.subheader("Piping & Elevation")
-            D_inner = st.number_input("Pipe inner diameter (mm)", value=100.0, min_value=1.0)
-            L_pipe = st.number_input("Pipe length (m)", value=100.0, min_value=0.0)
+            D_inner = st.number_input("Pipe inner diameter (mm)", value=preset_defaults.get('D_inner', 100.0), min_value=1.0)
+            L_pipe = st.number_input("Pipe length (m)", value=preset_defaults.get('L_pipe', 100.0), min_value=0.0)
             elevation_in = st.number_input("Suction elevation (m)", value=0.0)
             elevation_out = st.number_input("Discharge elevation (m)", value=10.0)
             K_fittings = st.number_input("Total K (fittings)", value=2.0, min_value=0.0)
@@ -1049,38 +1094,63 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                 electricity_cost = st.number_input("Electricity cost (₹/kWh)", value=10.0, min_value=0.0)
                 operating_hours = st.number_input("Operating hours/year", value=8000.0, min_value=0.0)
             colebrook_method = st.selectbox(
-                "Colebrook solver",
-                ['Swamee-Jain (explicit)', 'Newton-Raphson', 'Bracketed (robust)'],
-                index=2
-            )
-        submitted = st.form_submit_button("🚀 Calculate", type="primary")
+                    "Colebrook solver",
+                    ['Swamee-Jain (explicit)', 'Newton-Raphson', 'Bracketed (robust)'],
+                    index=2
+                )
+
+            # If using immediate auto-update, treat as submitted; otherwise wait for Apply
+            if auto_update:
+                submitted = True
+            else:
+                submitted = st.form_submit_button("🚀 Calculate", type="primary")
 
     if submitted:
         try:
-            # Flow conversion
-            if Q_unit == 'm³/h':
-                Q_m3s = Q_input / 3600.0
-            elif Q_unit == 'L/s':
-                Q_m3s = Q_input / 1000.0
-            elif Q_unit == 'm³/d':
-                Q_m3s = Q_input / (24*3600)
-            elif Q_unit == 'GPM (US)':
-                Q_m3s = Q_input * 0.00378541178 / 60.0
-            else:
-                Q_m3s = Q_input
+            progress = None
+            # Basic input validation
+            if Q_input <= 0:
+                st.error("Flow rate must be > 0")
+                st.stop()
+            if D_inner <= 0:
+                st.error("Pipe inner diameter must be > 0")
+                st.stop()
 
-            # Basic calculations
-            mu = mu_cP / 1000.0
-            D = D_inner / 1000.0
-            V = velocity_from_flow(Q_m3s, D)
-            Re = reynolds(density, V, D, mu)
-            f = colebrook_f(Re, D, eps_mm/1000.0, method=colebrook_method, tol=1e-8, max_iter=100)
-            hf = darcy_head_loss(f, L_pipe, D, V)
-            hm = minor_loss_head(K_fittings, V)
-            static_head = elevation_out - elevation_in
-            total_head = static_head + hf + hm
-            total_head_design = total_head * (1.0 + safety_margin_head)
-            Q_design = Q_m3s * (1.0 + safety_margin_flow)
+            # Provide progress feedback for heavier calculations
+            with st.spinner("Running hydraulic calculations..."):
+                progress = st.progress(0)
+
+                # Flow conversion
+                if Q_unit == 'm³/h':
+                    Q_m3s = Q_input / 3600.0
+                elif Q_unit == 'L/s':
+                    Q_m3s = Q_input / 1000.0
+                elif Q_unit == 'm³/d':
+                    Q_m3s = Q_input / (24*3600)
+                elif Q_unit == 'GPM (US)':
+                    Q_m3s = Q_input * 0.00378541178 / 60.0
+                else:
+                    Q_m3s = Q_input
+                progress.progress(10)
+
+                # Basic calculations
+                mu = mu_cP / 1000.0
+                D = D_inner / 1000.0
+                V = velocity_from_flow(Q_m3s, D)
+                progress.progress(30)
+
+                Re = reynolds(density, V, D, mu)
+                # Colebrook may be expensive for many calls; cache applied
+                f = colebrook_f(Re, D, eps_mm/1000.0, method=colebrook_method, tol=1e-8, max_iter=100)
+                progress.progress(55)
+
+                hf = darcy_head_loss(f, L_pipe, D, V)
+                hm = minor_loss_head(K_fittings, V)
+                static_head = elevation_out - elevation_in
+                total_head = static_head + hf + hm
+                total_head_design = total_head * (1.0 + safety_margin_head)
+                Q_design = Q_m3s * (1.0 + safety_margin_flow)
+                progress.progress(75)
 
             # Multiple pump configuration
             if pump_config == 'Parallel (n pumps)':
@@ -1137,6 +1207,10 @@ if page == "Rotating Pumps (Centrifugal etc.)":
 
             # Generate curves
             Q_points, H_system, H_pump, eff_curve, power_curve = generate_pump_curves(Q_design, total_head_design, static_head)
+            try:
+                progress.progress(95)
+            except Exception:
+                pass
             Q_bep, eff_bep, bep_idx = compute_bep(Q_points, eff_curve)
 
             # Operating point
@@ -1291,34 +1365,49 @@ if page == "Rotating Pumps (Centrifugal etc.)":
 
             with tab2:
                 st.subheader("Performance Curves")
-                fig1, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
-                ax1.plot(Q_points*3600, H_system, 'b-', linewidth=2, label='System Curve')
-                ax1.plot(Q_points*3600, H_pump, 'r-', linewidth=2, label='Pump Curve')
-                ax1.scatter([Q_bep*3600], [H_pump[bep_idx]], color='green', s=150, 
-                           marker='*', label='BEP', zorder=5, edgecolors='black')
-                ax1.scatter([Q_op*3600], [H_op], color='orange', s=150, 
-                           marker='D', label='Operating Point', zorder=5, edgecolors='black')
-                ax1.fill_between(Q_points*3600, H_system, alpha=0.2, color='blue')
-                ax1.set_xlabel('Flow Rate (m³/h)', fontsize=11, fontweight='bold')
-                ax1.set_ylabel('Head (m)', fontsize=11, fontweight='bold')
-                ax1.set_title('Pump & System Curves', fontsize=12, fontweight='bold')
-                ax1.legend(loc='best', framealpha=0.9)
-                ax1.grid(True, alpha=0.3, linestyle=':')
+                # Interactive system vs pump curve (Plotly)
+                try:
+                    flow_h = (Q_points * 3600).tolist()
+                except Exception:
+                    flow_h = list(Q_points * 3600)
 
-                ax2.plot(Q_points*3600, eff_curve*100, 'g-', linewidth=2, label='Efficiency')
-                ax2.axvline(Q_bep*3600, color='green', linestyle='--', alpha=0.7, label='BEP')
-                ax2.fill_between(Q_points*3600, eff_curve*100, alpha=0.3, color='green')
-                ax2.set_xlabel('Flow Rate (m³/h)', fontsize=11, fontweight='bold')
-                ax2.set_ylabel('Efficiency (%)', fontsize=11, fontweight='bold')
-                ax2.set_title('Pump Efficiency Curve', fontsize=12, fontweight='bold')
-                ax2.legend(loc='best', framealpha=0.9)
-                ax2.grid(True, alpha=0.3, linestyle=':')
-                ax2.set_ylim([0, 100])
+                fig_sys = go.Figure()
+                fig_sys.add_trace(go.Scatter(x=flow_h, y=list(H_system), mode='lines', name='System Curve', line=dict(color='blue')))
+                fig_sys.add_trace(go.Scatter(x=flow_h, y=list(H_pump), mode='lines', name='Pump Curve', line=dict(color='red')))
+                # BEP and operating point markers
+                fig_sys.add_trace(go.Scatter(x=[Q_bep*3600], y=[H_pump[bep_idx]], mode='markers', name='BEP', marker=dict(color='green', size=12, symbol='star')))
+                fig_sys.add_trace(go.Scatter(x=[Q_op*3600], y=[H_op], mode='markers', name='Operating Point', marker=dict(color='orange', size=10, symbol='diamond')))
+                fig_sys.update_layout(title='Pump & System Curves', xaxis_title='Flow Rate (m³/h)', yaxis_title='Head (m)', legend=dict(orientation='h', yanchor='bottom', y=-0.25, xanchor='left', x=0))
+                fig_sys.update_xaxes(showgrid=True)
+                fig_sys.update_yaxes(showgrid=True)
+                st.plotly_chart(fig_sys, use_container_width=True)
 
-                plt.tight_layout()
-                st.pyplot(fig1)
-                plt.close()
+                # Efficiency and Power vs Flow (Plotly with secondary y-axis)
+                fig_perf = make_subplots(specs=[[{"secondary_y": True}]])
+                fig_perf.add_trace(go.Scatter(x=flow_h, y=(eff_curve*100).tolist(), name='Efficiency (%)', line=dict(color='green')), secondary_y=False)
+                fig_perf.add_trace(go.Scatter(x=flow_h, y=list(power_curve), name='Power (kW)', line=dict(color='red')), secondary_y=True)
+                # Vertical line for BEP
+                fig_perf.add_vline(x=Q_bep*3600, line=dict(color='green', dash='dash'), annotation_text='BEP', annotation_position='top')
+                fig_perf.update_xaxes(title_text='Flow Rate (m³/h)')
+                fig_perf.update_yaxes(title_text='Efficiency (%)', secondary_y=False, range=[0, 100])
+                fig_perf.update_yaxes(title_text='Power (kW)', secondary_y=True)
+                fig_perf.update_layout(title='Power & Efficiency vs Flow', legend=dict(orientation='h', yanchor='bottom', y=-0.25, xanchor='left', x=0))
+                st.plotly_chart(fig_perf, use_container_width=True)
+
+                # Export curve data as CSV
+                try:
+                    df_export = pd.DataFrame({
+                        'Flow (m³/h)': flow_h,
+                        'System Head (m)': list(H_system),
+                        'Pump Head (m)': list(H_pump),
+                        'Efficiency (%)': (eff_curve*100).tolist(),
+                        'Power (kW)': list(power_curve)
+                    })
+                    csv = df_export.to_csv(index=False)
+                    st.download_button(label='📥 Download Curve Data (CSV)', data=csv, file_name=f'pump_curves_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv', mime='text/csv')
+                except Exception:
+                    pass
 
             with tab3:
                 st.subheader("⚙️ Advanced Analysis")
