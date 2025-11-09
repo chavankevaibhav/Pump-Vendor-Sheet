@@ -8,8 +8,22 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import io
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import contextlib
+from scipy import stats, optimize
+
+# Install required packages if not already installed
+import subprocess
+import sys
+
+def install_package(package):
+    try:
+        __import__(package)
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+# Install required packages
+install_package('scipy')
 
 # Set page config at the very top
 st.set_page_config(page_title="Advanced Pump & Vacuum Sizing", layout="wide")
@@ -49,7 +63,8 @@ PRESETS = {
 page = st.sidebar.selectbox("Choose tool", [
     "Rotating Pumps (Centrifugal etc.)", 
     "Pump System Comparison",
-    "Life Cycle Cost Analysis"
+    "Life Cycle Cost Analysis",
+    "TCO Calculator"  
 ])
 
 # ------------------ Helper functions ------------------
@@ -1009,7 +1024,563 @@ def api610_testing_requirements():
         'Mechanical Run': {'required': True, 'duration': '4 hours minimum'}
     }
 
+def analyze_failure_modes(pump_type, operating_conditions):
+    """Analyze potential failure modes and their probabilities."""
+    failure_modes = {
+        'Bearing Failure': {
+            'probability': 0.0,
+            'impact': 'High',
+            'mtbf_hours': 50000,
+            'warning_signs': ['High vibration', 'Increased temperature', 'Unusual noise'],
+            'preventive_actions': ['Regular lubrication', 'Alignment checks', 'Vibration monitoring']
+        },
+        'Seal Failure': {
+            'probability': 0.0,
+            'impact': 'Medium',
+            'mtbf_hours': 30000,
+            'warning_signs': ['Leakage', 'Increased temperature'],
+            'preventive_actions': ['Regular inspection', 'Flush system maintenance']
+        },
+        'Cavitation': {
+            'probability': 0.0,
+            'impact': 'High',
+            'mtbf_hours': 0,  # Calculated based on NPSH margin
+            'warning_signs': ['Noise', 'Vibration', 'Performance drop'],
+            'preventive_actions': ['Maintain NPSH margin', 'Monitor suction conditions']
+        }
+    }
+    
+    # Update probabilities based on operating conditions
+    if operating_conditions.get('npsh_margin', 0) < 0.5:
+        failure_modes['Cavitation']['probability'] = 0.8
+    elif operating_conditions.get('npsh_margin', 0) < 1.0:
+        failure_modes['Cavitation']['probability'] = 0.4
+    
+    if operating_conditions.get('temperature', 25) > 80:
+        failure_modes['Seal Failure']['probability'] += 0.3
+        failure_modes['Bearing Failure']['probability'] += 0.2
+    
+    if operating_conditions.get('vibration_severity', 'Low') == 'High':
+        failure_modes['Bearing Failure']['probability'] += 0.4
+    
+    return failure_modes
+
+def optimize_maintenance_cost(equipment_cost, failure_rates, maintenance_costs):
+    """Optimize maintenance intervals for minimum total cost."""
+    from scipy.optimize import minimize
+    
+    def total_cost_function(maintenance_interval):
+        # Annual maintenance cost
+        annual_maintenance = (maintenance_costs['preventive'] * 8760) / maintenance_interval
+        
+        # Failure probability increases with maintenance interval
+        failure_prob = 1 - np.exp(-failure_rates['base'] * maintenance_interval)
+        failure_cost = failure_prob * maintenance_costs['corrective']
+        
+        # Production loss cost
+        downtime_cost = failure_prob * maintenance_costs['downtime_per_hour'] * maintenance_costs['repair_hours']
+        
+        return annual_maintenance + failure_cost + downtime_cost
+    
+    # Find optimal maintenance interval
+    result = minimize(total_cost_function, x0=[2000], bounds=[(100, 8760)])
+    
+    return {
+        'optimal_interval': result.x[0],
+        'minimum_cost': result.fun,
+        'convergence': result.success
+    }
+
+def optimize_spare_parts_inventory(parts_data, lead_time_days, service_level):
+    """Calculate optimal spare parts inventory levels."""
+    from scipy.stats import norm
+    
+    inventory_recommendations = {}
+    
+    for part, data in parts_data.items():
+        # Calculate safety stock
+        z_score = norm.ppf(service_level)
+        safety_stock = z_score * np.sqrt(lead_time_days) * data['demand_std']
+        
+        # Calculate reorder point
+        reorder_point = (data['demand_rate'] * lead_time_days) + safety_stock
+        
+        # Calculate economic order quantity
+        eoq = np.sqrt((2 * data['annual_demand'] * data['order_cost']) / data['holding_cost'])
+        
+        inventory_recommendations[part] = {
+            'safety_stock': safety_stock,
+            'reorder_point': reorder_point,
+            'order_quantity': eoq,
+            'annual_cost': (eoq/2) * data['holding_cost'] + (data['annual_demand']/eoq) * data['order_cost']
+        }
+    
+    return inventory_recommendations
+
+def run_monte_carlo_simulation(base_parameters, uncertainty_ranges, n_simulations=1000):
+    """Run Monte Carlo simulation for life cycle cost analysis."""
+    results = {
+        'total_costs': [],
+        'npv_values': [],
+        'roi_values': [],
+        'risk_metrics': {}
+    }
+    
+    for _ in range(n_simulations):
+        # Generate random variations of parameters
+        params = {
+            k: np.random.uniform(v['min'], v['max']) 
+            for k, v in uncertainty_ranges.items()
+        }
+        
+        # Calculate costs with varied parameters
+        simulation_result = calculate_life_cycle_cost(
+            initial_cost=params.get('initial_cost', base_parameters['initial_cost']),
+            power_kW=params.get('power_kW', base_parameters['power_kW']),
+            efficiency=params.get('efficiency', base_parameters['efficiency']),
+            operating_hours=params.get('operating_hours', base_parameters['operating_hours']),
+            electricity_rate=params.get('electricity_rate', base_parameters['electricity_rate']),
+            maintenance_cost=params.get('maintenance_cost', base_parameters['maintenance_cost']),
+            expected_life_years=params.get('expected_life', base_parameters['expected_life'])
+        )
+        
+        results['total_costs'].append(simulation_result['total_life_cycle_cost'])
+        results['npv_values'].append(simulation_result.get('npv', 0))
+    
+    # Calculate risk metrics
+    results['risk_metrics'] = {
+        'mean_cost': np.mean(results['total_costs']),
+        'std_dev': np.std(results['total_costs']),
+        'var_95': np.percentile(results['total_costs'], 95) - np.percentile(results['total_costs'], 5),
+        'probability_over_budget': sum(1 for x in results['total_costs'] if x > base_parameters['budget']) / n_simulations
+    }
+    
+    return results
+
+def calculate_life_cycle_cost(initial_cost, power_kW, efficiency, operating_hours_per_year,
+                            electricity_rate, maintenance_cost_per_year, expected_life_years,
+                            inflation_rate=0.03, discount_rate=0.08):
+    """Calculate detailed life cycle cost analysis for a pump system."""
+    
+    years = range(expected_life_years)
+    total_cost = initial_cost
+    annual_costs = []
+    energy_costs = []
+    maintenance_costs = []
+    
+    # Energy cost calculation
+    annual_energy_cost = power_kW * operating_hours_per_year * electricity_rate / efficiency
+    
+    for year in years:
+        # Apply inflation to operating costs
+        inflated_energy_cost = annual_energy_cost * (1 + inflation_rate)**year
+        inflated_maintenance = maintenance_cost_per_year * (1 + inflation_rate)**year
+        
+        # Calculate present value using discount rate
+        discount_factor = 1 / (1 + discount_rate)**year
+        present_value_energy = inflated_energy_cost * discount_factor
+        present_value_maintenance = inflated_maintenance * discount_factor
+        
+        energy_costs.append(present_value_energy)
+        maintenance_costs.append(present_value_maintenance)
+        annual_costs.append(present_value_energy + present_value_maintenance)
+        total_cost += present_value_energy + present_value_maintenance
+    
+    return {
+        'total_life_cycle_cost': total_cost,
+        'annual_costs': annual_costs,
+        'energy_costs': energy_costs,
+        'maintenance_costs': maintenance_costs,
+        'initial_cost': initial_cost,
+        'annual_energy_consumption_kWh': power_kW * operating_hours_per_year
+    }
+
+def analyze_pump_alternatives(base_case, alternatives):
+    """Compare multiple pump alternatives based on life cycle cost."""
+    results = []
+    
+    # Calculate base case metrics
+    base_npv = base_case['life_cycle_cost']
+    
+    for alt in alternatives:
+        savings = base_npv - alt['life_cycle_cost']
+        payback_years = alt['initial_cost'] / (base_case['annual_cost'] - alt['annual_cost']) if savings > 0 else float('inf')
+        
+        results.append({
+            'name': alt['name'],
+            'savings': savings,
+            'payback_years': payback_years,
+            'roi': (savings / alt['initial_cost'] * 100) if alt['initial_cost'] > 0 else 0,
+            'life_cycle_cost': alt['life_cycle_cost']
+        })
+    
+    return results
+
+def calculate_environmental_impact(power_kW, operating_hours, co2_per_kwh=0.5):
+    """Calculate environmental impact metrics."""
+    annual_energy = power_kW * operating_hours
+    annual_co2 = annual_energy * co2_per_kwh
+    
+    return {
+        'annual_energy_consumption': annual_energy,
+        'annual_co2_emissions': annual_co2,
+        'carbon_intensity': co2_per_kwh
+    }
+
+def optimize_maintenance_schedule(equipment_age, condition_score, failure_history=None):
+    """Generate optimized maintenance schedule based on equipment condition."""
+    if failure_history is None:
+        failure_history = []
+    
+    base_interval = 4000  # Base hours between maintenance
+    
+    # Adjust interval based on condition score (0-100)
+    if condition_score < 50:
+        interval_multiplier = 0.6
+    elif condition_score < 75:
+        interval_multiplier = 0.8
+    else:
+        interval_multiplier = 1.0
+    
+    # Adjust for equipment age
+    age_factor = max(0.6, 1 - (equipment_age / 20))  # Assume 20-year design life
+    
+    # Consider failure history
+    if len(failure_history) > 0:
+        recent_failures = sum(1 for date in failure_history if (datetime.now() - date).days < 365)
+        failure_factor = max(0.5, 1 - (recent_failures * 0.2))
+    else:
+        failure_factor = 1.0
+    
+    recommended_interval = base_interval * interval_multiplier * age_factor * failure_factor
+    
+    return {
+        'recommended_interval': recommended_interval,
+        'next_maintenance_date': datetime.now() + timedelta(hours=recommended_interval),
+        'maintenance_tasks': [
+            {'task': 'Bearing inspection', 'interval': recommended_interval * 0.5},
+            {'task': 'Seal inspection', 'interval': recommended_interval * 0.3},
+            {'task': 'Alignment check', 'interval': recommended_interval * 0.25},
+            {'task': 'Performance test', 'interval': recommended_interval * 1.0},
+            {'task': 'Vibration analysis', 'interval': recommended_interval * 0.2}
+        ]
+    }
+
 # --- END helpers ---
+
+# ------------------ Life Cycle Cost Analysis Page ------------------
+if page == "Life Cycle Cost Analysis":
+    st.title("💰 Life Cycle Cost Analysis")
+    
+    tab1, tab2, tab3, tab4 = st.tabs(["Cost Analysis", "Comparison", "Maintenance", "Reliability"])
+    
+    with tab1:
+        st.subheader("Pump System Cost Analysis")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            initial_cost = st.number_input("Initial Cost (₹)", value=100000.0, min_value=0.0)
+            power_kW = st.number_input("Power Rating (kW)", value=15.0, min_value=0.1)
+            efficiency = st.number_input("Pump Efficiency (%)", value=75.0, min_value=1.0, max_value=100.0) / 100.0
+            operating_hours = st.number_input("Annual Operating Hours", value=8000.0, min_value=0.0)
+            
+        with col2:
+            electricity_rate = st.number_input("Electricity Rate (₹/kWh)", value=10.0, min_value=0.0)
+            maintenance_cost = st.number_input("Annual Maintenance Cost (₹)", value=20000.0, min_value=0.0)
+            life_years = st.number_input("Expected Life (years)", value=20, min_value=1)
+            
+        advanced = st.expander("Advanced Parameters")
+        with advanced:
+            col3, col4 = st.columns(2)
+            with col3:
+                inflation_rate = st.number_input("Inflation Rate (%)", value=3.0, min_value=0.0, max_value=100.0) / 100.0
+            with col4:
+                discount_rate = st.number_input("Discount Rate (%)", value=8.0, min_value=0.0, max_value=100.0) / 100.0
+        
+        if st.button("Calculate Life Cycle Cost"):
+            results = calculate_life_cycle_cost(
+                initial_cost, power_kW, efficiency, operating_hours,
+                electricity_rate, maintenance_cost, life_years,
+                inflation_rate, discount_rate
+            )
+            
+            # Display results
+            st.success("Life Cycle Cost Analysis Complete")
+            
+            # Summary metrics
+            col5, col6, col7 = st.columns(3)
+            with col5:
+                st.metric("Total Life Cycle Cost", f"₹{results['total_life_cycle_cost']:,.2f}")
+            with col6:
+                annual_energy_cost = results['energy_costs'][0]
+                st.metric("First Year Energy Cost", f"₹{annual_energy_cost:,.2f}")
+            with col7:
+                st.metric("Annual Energy Use", f"{results['annual_energy_consumption_kWh']:,.0f} kWh")
+            
+            # Cost breakdown chart
+            st.subheader("Cost Breakdown")
+            total_energy = sum(results['energy_costs'])
+            total_maintenance = sum(results['maintenance_costs'])
+            total_cost = results['total_life_cycle_cost']
+            
+            fig_breakdown = go.Figure(data=[
+                go.Pie(labels=['Initial Cost', 'Energy Costs', 'Maintenance Costs'],
+                      values=[results['initial_cost'], total_energy, total_maintenance])
+            ])
+            fig_breakdown.update_layout(title="Life Cycle Cost Distribution")
+            st.plotly_chart(fig_breakdown, use_container_width=True)
+            
+            # Annual costs chart
+            st.subheader("Annual Costs Over Time")
+            years = list(range(life_years))
+            
+            fig_annual = go.Figure()
+            fig_annual.add_trace(go.Scatter(x=years, y=results['energy_costs'],
+                                          name='Energy Cost', stackgroup='costs'))
+            fig_annual.add_trace(go.Scatter(x=years, y=results['maintenance_costs'],
+                                          name='Maintenance Cost', stackgroup='costs'))
+            fig_annual.update_layout(title="Annual Costs (Present Value)",
+                                   xaxis_title="Year",
+                                   yaxis_title="Cost (₹)")
+            st.plotly_chart(fig_annual, use_container_width=True)
+            
+            # Environmental impact
+            env_impact = calculate_environmental_impact(power_kW, operating_hours)
+            st.subheader("Environmental Impact")
+            col8, col9 = st.columns(2)
+            with col8:
+                st.metric("Annual CO₂ Emissions", f"{env_impact['annual_co2_emissions']:,.0f} kg")
+            with col9:
+                st.metric("Carbon Intensity", f"{env_impact['carbon_intensity']} kg/kWh")
+    
+    with tab2:
+        st.subheader("Compare Alternatives")
+        st.write("Compare different pump options to find the most cost-effective solution.")
+        
+        # Base case (current configuration)
+        st.write("**Base Case Configuration**")
+        base_case = {
+            'life_cycle_cost': results['total_life_cycle_cost'] if 'results' in locals() else 0,
+            'annual_cost': annual_energy_cost + maintenance_cost if 'annual_energy_cost' in locals() else 0
+        }
+        
+        # Alternative configurations
+        st.write("**Alternative Configurations**")
+        num_alternatives = st.number_input("Number of alternatives to compare", min_value=1, max_value=5, value=2)
+        
+        alternatives = []
+        for i in range(num_alternatives):
+            with st.expander(f"Alternative {i+1}"):
+                alt_name = st.text_input("Name", f"Option {i+1}", key=f"alt_name_{i}")
+                alt_initial = st.number_input("Initial Cost (₹)", value=initial_cost*0.9, key=f"alt_initial_{i}")
+                alt_power = st.number_input("Power Rating (kW)", value=power_kW*0.95, key=f"alt_power_{i}")
+                alt_efficiency = st.number_input("Efficiency (%)", value=75.0, key=f"alt_eff_{i}") / 100.0
+                
+                # Calculate alternative costs
+                alt_results = calculate_life_cycle_cost(
+                    alt_initial, alt_power, alt_efficiency, operating_hours,
+                    electricity_rate, maintenance_cost*0.9, life_years,
+                    inflation_rate, discount_rate
+                )
+                
+                alternatives.append({
+                    'name': alt_name,
+                    'initial_cost': alt_initial,
+                    'life_cycle_cost': alt_results['total_life_cycle_cost'],
+                    'annual_cost': alt_results['energy_costs'][0] + maintenance_cost*0.9
+                })
+        
+        if st.button("Compare Alternatives"):
+            comparison = analyze_pump_alternatives(base_case, alternatives)
+            
+            # Create comparison table
+            comparison_data = [{
+                'Option': alt['name'],
+                'Life Cycle Cost (₹)': f"{alt['life_cycle_cost']:,.0f}",
+                'Savings vs Base (₹)': f"{alt['savings']:,.0f}",
+                'Payback (Years)': f"{alt['payback_years']:.1f}",
+                'ROI (%)': f"{alt['roi']:.1f}%"
+            } for alt in comparison]
+            
+            st.dataframe(pd.DataFrame(comparison_data), use_container_width=True)
+            
+            # Visualization of comparison
+            fig_comparison = go.Figure(data=[
+                go.Bar(name='Life Cycle Cost',
+                      x=['Base Case'] + [alt['name'] for alt in comparison],
+                      y=[base_case['life_cycle_cost']] + [alt['life_cycle_cost'] for alt in comparison])
+            ])
+            fig_comparison.update_layout(title="Life Cycle Cost Comparison",
+                                       yaxis_title="Cost (₹)")
+            st.plotly_chart(fig_comparison, use_container_width=True)
+    
+    with tab3:
+        st.subheader("Maintenance Optimization")
+        
+        col10, col11 = st.columns(2)
+        with col10:
+            equipment_age = st.number_input("Equipment Age (years)", value=0.0, min_value=0.0)
+            condition_score = st.slider("Equipment Condition Score", min_value=0, max_value=100, value=80)
+        
+        # Generate maintenance schedule
+        maintenance_schedule = optimize_maintenance_schedule(equipment_age, condition_score)
+        
+        st.write("**Recommended Maintenance Schedule**")
+        schedule_data = pd.DataFrame(maintenance_schedule['maintenance_tasks'])
+        schedule_data['interval'] = schedule_data['interval'].round(0)
+        schedule_data.columns = ['Task', 'Interval (hours)']
+        
+        st.dataframe(schedule_data, use_container_width=True)
+        
+        # Maintenance interval visualization
+        fig_maintenance = go.Figure()
+        for task in maintenance_schedule['maintenance_tasks']:
+            fig_maintenance.add_trace(go.Bar(
+                x=[task['task']],
+                y=[task['interval']],
+                name=task['task']
+            ))
+        
+        fig_maintenance.update_layout(title="Maintenance Intervals",
+                                    yaxis_title="Hours",
+                                    showlegend=False)
+        st.plotly_chart(fig_maintenance, use_container_width=True)
+        
+        # Condition-based recommendations
+        st.subheader("Condition-Based Recommendations")
+        if condition_score < 50:
+            st.warning("⚠️ Equipment condition is poor. Consider increased inspection frequency.")
+        elif condition_score < 75:
+            st.info("ℹ️ Equipment condition is fair. Maintain regular inspection schedule.")
+        else:
+            st.success("✅ Equipment condition is good. Continue preventive maintenance.")
+        
+        # Download maintenance report
+        if st.button("Generate Maintenance Report"):
+            report = {
+                'equipment_details': {
+                    'age': equipment_age,
+                    'condition_score': condition_score
+                },
+                'maintenance_schedule': maintenance_schedule,
+                'recommendations': {
+                    'next_maintenance': maintenance_schedule['next_maintenance_date'].strftime('%Y-%m-%d'),
+                    'interval_hours': maintenance_schedule['recommended_interval']
+                }
+            }
+            
+            # Convert to CSV
+            report_df = pd.DataFrame(maintenance_schedule['maintenance_tasks'])
+            csv = report_df.to_csv(index=False)
+            st.download_button(
+                label="Download Maintenance Schedule (CSV)",
+                data=csv,
+                file_name="maintenance_schedule.csv",
+                mime="text/csv"
+            )
+            
+    with tab4:  # Reliability Analysis tab
+        st.subheader("Reliability Analysis")
+        
+        # Operating conditions for failure mode analysis
+        operating_conditions = {
+            'npsh_margin': NPSH_margin if 'NPSH_margin' in locals() else 0,
+            'temperature': T if 'T' in locals() else 25,
+            'vibration_severity': vibration_severity if 'vibration_severity' in locals() else 'Low',
+            'operating_hours': operating_hours
+        }
+        
+        # Analyze failure modes
+        failure_modes = analyze_failure_modes('centrifugal', operating_conditions)
+        
+        # Display failure mode analysis
+        st.write("#### Failure Mode Analysis")
+        for mode, data in failure_modes.items():
+            with st.expander(f"{mode} - Risk Level: {data['impact']}"):
+                st.write(f"Probability: {data['probability']*100:.1f}%")
+                st.write(f"MTBF: {data['mtbf_hours']:,} hours")
+                st.write("Warning Signs:")
+                for sign in data['warning_signs']:
+                    st.write(f"- {sign}")
+                st.write("Preventive Actions:")
+                for action in data['preventive_actions']:
+                    st.write(f"- {action}")
+        
+        # Spare Parts Management
+        st.write("#### Spare Parts Inventory Management")
+        
+        # Sample parts data
+        parts_data = {
+            'Mechanical Seal': {
+                'demand_rate': 0.1,
+                'demand_std': 0.05,
+                'annual_demand': 2,
+                'order_cost': 5000,
+                'holding_cost': 1000
+            },
+            'Bearings': {
+                'demand_rate': 0.2,
+                'demand_std': 0.1,
+                'annual_demand': 4,
+                'order_cost': 2000,
+                'holding_cost': 500
+            }
+        }
+        
+        lead_time = st.number_input("Lead Time (days)", value=30, min_value=1)
+        service_level = st.slider("Service Level (%)", 80, 99, 95) / 100
+        
+        if st.button("Calculate Inventory Requirements"):
+            inventory_results = optimize_spare_parts_inventory(parts_data, lead_time, service_level)
+            
+            # Display results in a table
+            inventory_df = pd.DataFrame.from_dict(inventory_results, orient='index')
+            st.dataframe(inventory_df.round(2))
+        
+        # Monte Carlo simulation
+        st.write("#### Risk Analysis (Monte Carlo Simulation)")
+        if st.button("Run Risk Analysis"):
+            if all(var in locals() for var in ['initial_cost', 'power_kW', 'efficiency', 'operating_hours']):
+                uncertainty_ranges = {
+                    'initial_cost': {'min': initial_cost * 0.9, 'max': initial_cost * 1.1},
+                    'power_kW': {'min': power_kW * 0.95, 'max': power_kW * 1.05},
+                    'efficiency': {'min': efficiency * 0.9, 'max': efficiency * 1.1},
+                    'operating_hours': {'min': operating_hours * 0.8, 'max': operating_hours * 1.2}
+                }
+                
+                base_parameters = {
+                    'initial_cost': initial_cost,
+                    'power_kW': power_kW,
+                    'efficiency': efficiency,
+                    'operating_hours': operating_hours,
+                    'electricity_rate': electricity_rate,
+                    'maintenance_cost': maintenance_cost,
+                    'expected_life': life_years,
+                    'budget': initial_cost * 2
+                }
+                
+                simulation_results = run_monte_carlo_simulation(base_parameters, uncertainty_ranges)
+                
+                # Display simulation results
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Expected Total Cost", 
+                             f"₹{simulation_results['risk_metrics']['mean_cost']:,.2f}",
+                             f"±{simulation_results['risk_metrics']['std_dev']:,.2f}")
+                with col2:
+                    st.metric("Probability Over Budget",
+                             f"{simulation_results['risk_metrics']['probability_over_budget']*100:.1f}%")
+                
+                # Plot cost distribution
+                fig = go.Figure(data=[go.Histogram(x=simulation_results['total_costs'],
+                                                 nbinsx=50,
+                                                 name='Cost Distribution')])
+                fig.update_layout(title='Life Cycle Cost Distribution',
+                                 xaxis_title='Total Cost (₹)',
+                                 yaxis_title='Frequency')
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("Please complete the Cost Analysis section first to run the risk analysis.")
 
 # ------------------ Rotating Pumps Page ------------------
 if page == "Rotating Pumps (Centrifugal etc.)":
@@ -2608,8 +3179,15 @@ elif page == "Pump System Comparison":
         st.session_state['comparison_data'] = []
     comparison_data = st.session_state['comparison_data']
 
-    num_systems = st.slider("Number of systems to compare", 2, 3, 2)
-    
+    num_systems = st.slider("Number of systems to compare", 2, 5, 2)
+
+    # Target design data to compare against
+    design_col1, design_col2 = st.columns(2)
+    with design_col1:
+        target_flow = st.number_input("Target Design Flow (m³/h)", value=100.0)
+    with design_col2:
+        target_head = st.number_input("Target Design Head (m)", value=20.0)
+
     cols = st.columns(num_systems)
     for i, col in enumerate(cols):
         with col:
@@ -2623,8 +3201,11 @@ elif page == "Pump System Comparison":
                 cost = st.number_input("Capital Cost (₹)", value=5000.0*(i+1))
                 submitted = st.form_submit_button("Add System")
                 if submitted:
+                    # Store a human-readable Design Data string for table display
+                    design_data_str = f"{flow:.1f} m³/h @ {head:.1f} m"
                     st.session_state['comparison_data'].append({
                         'Name': name,
+                        'Design Data': design_data_str,
                         'Flow (m³/h)': flow,
                         'Head (m)': head,
                         'Efficiency (%)': efficiency,
@@ -2633,27 +3214,133 @@ elif page == "Pump System Comparison":
                     })
                     st.rerun()
 
-    if len(comparison_data) >= 2:
+    if len(comparison_data) >= 1:
         df_comp = pd.DataFrame(comparison_data)
         st.markdown("---")
         st.subheader("Comparison Results")
-        st.dataframe(df_comp, use_container_width=True)
 
-        if st.button("Calculate Best Pump"):
-            df_comp['Efficiency Score'] = df_comp['Efficiency (%)'] / df_comp['Efficiency (%)'].max()
-            df_comp['Power Score'] = 1 - (df_comp['Power (kW)'] / df_comp['Power (kW)'].max())
-            df_comp['Cost Score'] = 1 - (df_comp['Capital Cost (₹)'] / df_comp['Capital Cost (₹)'].max())
-            
-            weights = {'Efficiency': 0.4, 'Power': 0.35, 'Cost': 0.25}
-            
-            df_comp['Total Score'] = (
-                df_comp['Efficiency Score'] * weights['Efficiency'] +
-                df_comp['Power Score'] * weights['Power'] +
-                df_comp['Cost Score'] * weights['Cost']
-            )
-            
-            best_pump = df_comp.loc[df_comp['Total Score'].idxmax()]
-            st.success(f"🏆 Recommended Pump: {best_pump['Name']}")
+        # Show table including Design Data column
+        display_cols = ['Name', 'Design Data', 'Flow (m³/h)', 'Head (m)', 'Efficiency (%)', 'Power (kW)', 'Capital Cost (₹)']
+        st.dataframe(df_comp[display_cols], use_container_width=True)
+
+        # Manage existing systems: edit or remove
+        st.markdown("### Manage Systems")
+        for idx, item in enumerate(st.session_state['comparison_data']):
+            cols_manage = st.columns([3,1,1])
+            with cols_manage[0]:
+                st.write(f"**{item.get('Name','System')}** — {item.get('Design Data','')}")
+            with cols_manage[1]:
+                if st.button("Edit", key=f"edit_btn_{idx}"):
+                    st.session_state['_editing_index'] = idx
+                    st.experimental_rerun()
+            with cols_manage[2]:
+                if st.button("Remove", key=f"remove_btn_{idx}"):
+                    st.session_state['comparison_data'].pop(idx)
+                    # Clear any editing state if it pointed to a removed index
+                    if st.session_state.get('_editing_index', None) == idx:
+                        st.session_state.pop('_editing_index', None)
+                    st.experimental_rerun()
+
+        # If editing requested, show an edit form
+        if '_editing_index' in st.session_state:
+            edit_idx = st.session_state['_editing_index']
+            if 0 <= edit_idx < len(st.session_state['comparison_data']):
+                st.markdown(f"#### Edit System {edit_idx+1}")
+                item = st.session_state['comparison_data'][edit_idx]
+                with st.form(f"edit_form_{edit_idx}"):
+                    new_name = st.text_input("System Name", value=item.get('Name', f'System {edit_idx+1}'))
+                    new_flow = st.number_input("Flow (m³/h)", value=float(item.get('Flow (m³/h)', 100.0)))
+                    new_head = st.number_input("Head (m)", value=float(item.get('Head (m)', 20.0)))
+                    new_eff = st.number_input("Efficiency (%)", value=float(item.get('Efficiency (%)', 70.0)))
+                    new_power = st.number_input("Power (kW)", value=float(item.get('Power (kW)', 10.0)))
+                    new_cost = st.number_input("Capital Cost (₹)", value=float(item.get('Capital Cost (₹)', 5000.0)))
+                    update = st.form_submit_button("Update System")
+                    cancel = st.form_submit_button("Cancel")
+                    if update:
+                        st.session_state['comparison_data'][edit_idx] = {
+                            'Name': new_name,
+                            'Design Data': f"{new_flow:.1f} m³/h @ {new_head:.1f} m",
+                            'Flow (m³/h)': new_flow,
+                            'Head (m)': new_head,
+                            'Efficiency (%)': new_eff,
+                            'Power (kW)': new_power,
+                            'Capital Cost (₹)': new_cost
+                        }
+                        st.session_state.pop('_editing_index', None)
+                        st.experimental_rerun()
+                    if cancel:
+                        st.session_state.pop('_editing_index', None)
+                        st.experimental_rerun()
+
+        # Buttons and controls: weighted score + design-price weighting and top-N
+        col_btn1, col_ctrls = st.columns([1,2])
+        with col_btn1:
+            if st.button("Calculate Best Pump"):
+                df_work = df_comp.copy()
+                df_work['Efficiency Score'] = df_work['Efficiency (%)'] / df_work['Efficiency (%)'].max()
+                df_work['Power Score'] = 1 - (df_work['Power (kW)'] / df_work['Power (kW)'].max())
+                df_work['Cost Score'] = 1 - (df_work['Capital Cost (₹)'] / df_work['Capital Cost (₹)'].max())
+
+                weights = {'Efficiency': 0.4, 'Power': 0.35, 'Cost': 0.25}
+
+                df_work['Total Score'] = (
+                    df_work['Efficiency Score'] * weights['Efficiency'] +
+                    df_work['Power Score'] * weights['Power'] +
+                    df_work['Cost Score'] * weights['Cost']
+                )
+
+                best_pump = df_work.loc[df_work['Total Score'].idxmax()]
+                st.success(f"🏆 Recommended Pump (weighted): {best_pump['Name']}")
+
+        with col_ctrls:
+            st.markdown("#### Design vs Price Settings")
+            weight_pct = st.slider("Design weight (%)", 0, 100, 70)
+            top_n = st.number_input("Show top N matches", min_value=1, max_value=max(1, len(df_comp)), value=min(3, len(df_comp)))
+
+            if st.button("Compare by Design & Price (Top-N)"):
+                df_work = df_comp.copy()
+
+                # Compute normalized percent distance from target design
+                tf = max(abs(target_flow), 1e-6)
+                th = max(abs(target_head), 1e-6)
+
+                df_work['Flow Diff %'] = (df_work['Flow (m³/h)'] - target_flow) / tf
+                df_work['Head Diff %'] = (df_work['Head (m)'] - target_head) / th
+                df_work['Design Distance'] = np.sqrt(df_work['Flow Diff %']**2 + df_work['Head Diff %']**2)
+
+                # Normalize distance and cost to [0,1] (0 best -> 1 worst), then invert so higher is better
+                max_dist = df_work['Design Distance'].max()
+                if max_dist <= 0:
+                    df_work['Norm Dist'] = 0.0
+                else:
+                    df_work['Norm Dist'] = df_work['Design Distance'] / max_dist
+
+                max_cost = df_work['Capital Cost (₹)'].max()
+                if max_cost <= 0:
+                    df_work['Norm Cost'] = 0.0
+                else:
+                    df_work['Norm Cost'] = df_work['Capital Cost (₹)'] / max_cost
+
+                w = weight_pct / 100.0
+                df_work['Combined Score'] = w * (1 - df_work['Norm Dist']) + (1 - w) * (1 - df_work['Norm Cost'])
+
+                df_sorted = df_work.sort_values(by=['Combined Score', 'Capital Cost (₹)'], ascending=[False, True]).reset_index(drop=True)
+
+                top_n = int(min(top_n, len(df_sorted)))
+                top_matches = df_sorted.head(top_n)
+
+                best = top_matches.iloc[0]
+                # Display best and top-N table
+                st.success(f"🔎 Best match by design+price: {best['Name']}")
+                if 'Design Data' in best and best['Design Data']:
+                    design_display = best['Design Data']
+                else:
+                    design_display = f"{best['Flow (m³/h)']:.1f} m³/h @ {best['Head (m)']:.1f} m"
+                st.write(f"Design Data: {design_display}")
+                st.write(f"Capital Cost: ₹{best['Capital Cost (₹)']:,.2f}")
+
+                show_cols = ['Name', 'Design Data', 'Flow (m³/h)', 'Head (m)', 'Design Distance', 'Combined Score', 'Capital Cost (₹)']
+                st.dataframe(top_matches[show_cols].assign(**{'Design Distance': top_matches['Design Distance'].map(lambda v: f"{v:.3f}"), 'Combined Score': top_matches['Combined Score'].map(lambda v: f"{v:.3f}"), 'Capital Cost (₹)': top_matches['Capital Cost (₹)'].map(lambda v: f"₹{v:,.2f}")}), use_container_width=True)
 
 # ------------------ Life Cycle Cost Analysis Page ------------------
 elif page == "Life Cycle Cost Analysis":
