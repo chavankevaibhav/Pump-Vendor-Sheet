@@ -9,6 +9,7 @@ from plotly.subplots import make_subplots
 import io
 import json
 from datetime import datetime
+import contextlib
 
 # Set page config at the very top
 st.set_page_config(page_title="Advanced Pump & Vacuum Sizing", layout="wide")
@@ -18,9 +19,16 @@ st.title("🔧 Advanced Pump & Vacuum Pump Sizing Sheet — Vendor Ready")
 auto_update = st.sidebar.checkbox("Auto-update (real-time recalculation)", value=True)
 
 def maybe_form(key: str):
-    """Return a context manager: st (immediate) or st.form(key) when auto_update is off."""
+    """Return a context manager: a no-op context when auto_update is on (immediate),
+    or st.form(key) when auto_update is off.
+
+    Using contextlib.nullcontext() allows usage like:
+        form_ctx = maybe_form('rotating')
+        with form_ctx:
+            # works both when auto_update True (nullcontext) and False (st.form)
+    """
     if auto_update:
-        return st
+        return contextlib.nullcontext()
     return st.form(key)
 
 # Presets for quick configuration
