@@ -1268,6 +1268,365 @@ def optimize_maintenance_schedule(equipment_age, condition_score, failure_histor
 
 # --- END helpers ---
 
+# ------------------ TCO Calculator Page ------------------
+if page == "TCO Calculator":
+    st.header("💰 Total Cost of Ownership (TCO) Calculator")
+    
+    # Initial Costs Section
+    st.subheader("1. Initial Investment Costs")
+    col1, col2 = st.columns(2)
+    with col1:
+        purchase_cost = st.number_input("Purchase Cost (₹)", value=100000.0, min_value=0.0)
+        installation_cost = st.number_input("Installation Cost (₹)", value=20000.0, min_value=0.0)
+        piping_cost = st.number_input("Piping Cost (₹)", value=15000.0, min_value=0.0)
+    with col2:
+        electrical_install = st.number_input("Electrical Installation (₹)", value=10000.0, min_value=0.0)
+        training_cost = st.number_input("Training Cost (₹)", value=5000.0, min_value=0.0)
+        other_initial = st.number_input("Other Initial Costs (₹)", value=0.0, min_value=0.0)
+    
+    initial_total = purchase_cost + installation_cost + piping_cost + electrical_install + training_cost + other_initial
+    
+    # Operating Costs Section
+    st.subheader("2. Annual Operating Costs")
+    col3, col4 = st.columns(2)
+    with col3:
+        power_rating = st.number_input("Pump Power Rating (kW)", value=15.0, min_value=0.1)
+        operating_hours = st.number_input("Annual Operating Hours", value=8000.0, min_value=0.0)
+        electricity_rate = st.number_input("Electricity Rate (₹/kWh)", value=8.0, min_value=0.0)
+        maintenance_cost = st.number_input("Annual Maintenance Cost (₹)", value=10000.0, min_value=0.0)
+    with col4:
+        labor_cost = st.number_input("Annual Labor Cost (₹)", value=20000.0, min_value=0.0)
+        spare_parts = st.number_input("Annual Spare Parts Cost (₹)", value=15000.0, min_value=0.0)
+        consumables = st.number_input("Annual Consumables Cost (₹)", value=5000.0, min_value=0.0)
+        other_operating = st.number_input("Other Annual Operating Costs (₹)", value=0.0, min_value=0.0)
+    
+    # Calculate annual energy cost
+    annual_energy_cost = power_rating * operating_hours * electricity_rate
+    annual_operating_total = annual_energy_cost + maintenance_cost + labor_cost + spare_parts + consumables + other_operating
+    
+    # Life Cycle Parameters
+    st.subheader("3. Life Cycle Parameters")
+    col5, col6 = st.columns(2)
+    with col5:
+        life_years = st.number_input("Expected Life (years)", value=20, min_value=1)
+        inflation_rate = st.number_input("Inflation Rate (%)", value=3.0, min_value=0.0, max_value=100.0) / 100
+        maintenance_inflation = st.number_input("Maintenance Cost Inflation (%)", value=4.0, min_value=0.0, max_value=100.0) / 100
+    with col6:
+        discount_rate = st.number_input("Discount Rate (%)", value=8.0, min_value=0.0, max_value=100.0) / 100
+        disposal_cost = st.number_input("End-of-Life Disposal Cost (₹)", value=10000.0, min_value=0.0)
+        salvage_value = st.number_input("Expected Salvage Value (₹)", value=0.0, min_value=0.0)
+
+    # Risk Analysis Parameters
+    st.subheader("4. Risk Analysis Parameters")
+    with st.expander("Configure Risk Analysis"):
+        col_risk1, col_risk2 = st.columns(2)
+        with col_risk1:
+            maintenance_variation = st.number_input("Maintenance Cost Variation (%)", value=20.0, min_value=0.0, max_value=100.0) / 100
+            energy_cost_variation = st.number_input("Energy Cost Variation (%)", value=15.0, min_value=0.0, max_value=100.0) / 100
+        with col_risk2:
+            lifetime_variation = st.number_input("Lifetime Variation (years)", value=2, min_value=0)
+            reliability_factor = st.slider("Equipment Reliability Factor", 0.8, 1.0, 0.95, 0.01)
+    
+    # Efficiency Degradation
+    st.subheader("5. Efficiency Parameters")
+    with st.expander("Configure Efficiency Degradation"):
+        col_eff1, col_eff2 = st.columns(2)
+        with col_eff1:
+            annual_efficiency_loss = st.number_input("Annual Efficiency Loss (%)", value=0.5, min_value=0.0, max_value=10.0) / 100
+            maintenance_improvement = st.number_input("Efficiency Improvement After Maintenance (%)", value=2.0, min_value=0.0, max_value=100.0) / 100
+        with col_eff2:
+            enable_predictive = st.checkbox("Enable Predictive Maintenance Model", value=True)
+            if enable_predictive:
+                maintenance_interval = st.number_input("Maintenance Interval (months)", value=12, min_value=1, max_value=60)
+    
+    # Comparative Analysis
+    st.subheader("6. Comparative Analysis")
+    with st.expander("Add Alternative Scenario"):
+        col_alt1, col_alt2 = st.columns(2)
+        with col_alt1:
+            alt_initial_cost = st.number_input("Alternative Initial Cost (₹)", value=initial_total * 1.2)
+            alt_operating_cost = st.number_input("Alternative Annual Operating Cost (₹)", value=annual_operating_total * 0.8)
+        with col_alt2:
+            alt_efficiency = st.number_input("Alternative Efficiency (%)", value=85.0, min_value=0.0, max_value=100.0) / 100
+            alt_life_years = st.number_input("Alternative Life Expectancy (years)", value=life_years + 5, min_value=1)
+    
+    if st.button("Calculate TCO"):
+        # Calculate TCO with Monte Carlo simulation if risk analysis is enabled
+        n_simulations = 1000 if maintenance_variation > 0 or energy_cost_variation > 0 or lifetime_variation > 0 else 1
+        
+        simulation_results = []
+        baseline_efficiency = 1.0
+        
+        for sim in range(n_simulations):
+            # Initialize simulation variables
+            total_operating_cost = 0
+            total_present_value = initial_total
+            current_efficiency = baseline_efficiency
+            
+            # Randomize parameters for this simulation
+            sim_life_years = max(1, life_years + np.random.randint(-lifetime_variation, lifetime_variation + 1))
+            sim_maintenance = maintenance_cost * (1 + np.random.uniform(-maintenance_variation, maintenance_variation))
+            sim_energy_rate = electricity_rate * (1 + np.random.uniform(-energy_cost_variation, energy_cost_variation))
+            
+            maintenance_schedule = []
+            if enable_predictive:
+                # Generate maintenance schedule
+                months_between = maintenance_interval
+                next_maintenance = months_between
+                while next_maintenance < sim_life_years * 12:
+                    maintenance_schedule.append(next_maintenance / 12)  # Convert to years
+                    next_maintenance += months_between
+            
+            for year in range(1, sim_life_years + 1):
+                # Apply efficiency degradation
+                if enable_predictive and year in maintenance_schedule:
+                    current_efficiency = min(baseline_efficiency, current_efficiency + maintenance_improvement)
+                else:
+                    current_efficiency *= (1 - annual_efficiency_loss)
+                
+                # Calculate costs with efficiency factor
+                energy_cost = annual_energy_cost * (1 / current_efficiency)
+                maintenance_base = sim_maintenance + labor_cost + spare_parts + consumables + other_operating
+                
+                # Apply different inflation rates
+                inflated_energy = energy_cost * (1 + inflation_rate) ** year
+                inflated_maintenance = maintenance_base * (1 + maintenance_inflation) ** year
+                
+                # Calculate present value
+                present_value = (inflated_energy + inflated_maintenance) / (1 + discount_rate) ** year
+                total_present_value += present_value * reliability_factor
+                total_operating_cost += inflated_energy + inflated_maintenance
+            
+            # Add disposal cost and subtract salvage value (present values)
+            end_year_factor = 1 / (1 + discount_rate) ** sim_life_years
+            disposal_present_value = disposal_cost * end_year_factor
+            salvage_present_value = salvage_value * end_year_factor
+            total_present_value = total_present_value + disposal_present_value - salvage_present_value
+            
+            simulation_results.append(total_present_value)
+        
+        # Calculate statistics from simulation results
+        total_present_value = np.mean(simulation_results)
+        tco_std_dev = np.std(simulation_results)
+        tco_percentiles = np.percentile(simulation_results, [10, 50, 90])
+        
+        # Display Results with Risk Analysis
+        st.success("TCO Analysis Complete")
+        
+        # Summary Metrics with Risk Analysis
+        col7, col8, col9 = st.columns(3)
+        with col7:
+            st.metric("Total Cost of Ownership", f"₹{total_present_value:,.2f}")
+            if n_simulations > 1:
+                st.caption(f"±₹{tco_std_dev:,.2f} std dev")
+        with col8:
+            st.metric("Initial Investment", f"₹{initial_total:,.2f}")
+            if n_simulations > 1:
+                st.caption(f"P90: ₹{tco_percentiles[2]:,.2f}")
+        with col9:
+            annual_tco = total_present_value / life_years
+            st.metric("Annualized TCO", f"₹{annual_tco:,.2f}")
+            if n_simulations > 1:
+                st.caption(f"P10: ₹{tco_percentiles[0]:,.2f}")
+        
+        # Risk Analysis Results
+        if n_simulations > 1:
+            st.subheader("Risk Analysis")
+            risk_col1, risk_col2 = st.columns(2)
+            with risk_col1:
+                # Histogram of simulation results
+                fig_hist = go.Figure(data=[go.Histogram(x=simulation_results, nbinsx=30)])
+                fig_hist.update_layout(
+                    title="TCO Distribution",
+                    xaxis_title="Total Cost of Ownership (₹)",
+                    yaxis_title="Frequency"
+                )
+                st.plotly_chart(fig_hist, use_container_width=True)
+            
+            with risk_col2:
+                # Risk metrics table
+                risk_metrics = pd.DataFrame({
+                    'Metric': ['Mean TCO', 'Standard Deviation', 'P10 Value', 'P50 Value', 'P90 Value'],
+                    'Value': [
+                        f"₹{total_present_value:,.2f}",
+                        f"₹{tco_std_dev:,.2f}",
+                        f"₹{tco_percentiles[0]:,.2f}",
+                        f"₹{tco_percentiles[1]:,.2f}",
+                        f"₹{tco_percentiles[2]:,.2f}"
+                    ]
+                })
+                st.dataframe(risk_metrics, use_container_width=True, hide_index=True)
+        
+        # Efficiency Analysis
+        if enable_predictive:
+            st.subheader("Efficiency Analysis")
+            eff_years = list(range(life_years + 1))
+            eff_values = []
+            baseline = 1.0
+            current = baseline
+            
+            for year in eff_years:
+                if year > 0:
+                    maintenance_year = any(abs(year - m) < 0.1 for m in maintenance_schedule)
+                    if maintenance_year:
+                        current = min(baseline, current + maintenance_improvement)
+                    else:
+                        current *= (1 - annual_efficiency_loss)
+                eff_values.append(current * 100)
+            
+            fig_eff = go.Figure()
+            fig_eff.add_trace(go.Scatter(x=eff_years, y=eff_values,
+                                       name='Efficiency', mode='lines+markers'))
+            fig_eff.update_layout(
+                title="Efficiency Degradation Over Time",
+                xaxis_title="Year",
+                yaxis_title="Efficiency (%)"
+            )
+            st.plotly_chart(fig_eff, use_container_width=True)
+        
+        # Comparative Analysis
+        if 'alt_initial_cost' in locals() and 'alt_operating_cost' in locals():
+            st.subheader("Comparative Analysis")
+            
+            # Calculate alternative TCO
+            alt_total_cost = alt_initial_cost
+            for year in range(1, alt_life_years + 1):
+                alt_present_value = alt_operating_cost * (1 + inflation_rate) ** year / (1 + discount_rate) ** year
+                alt_total_cost += alt_present_value
+            
+            comparison_data = pd.DataFrame({
+                'Scenario': ['Base Case', 'Alternative'],
+                'Initial Cost': [initial_total, alt_initial_cost],
+                'Annual Operating Cost': [annual_operating_total, alt_operating_cost],
+                'Life Years': [life_years, alt_life_years],
+                'Total TCO': [total_present_value, alt_total_cost],
+                'Annualized TCO': [total_present_value/life_years, alt_total_cost/alt_life_years]
+            })
+            
+            # Display comparison
+            st.dataframe(comparison_data.style.format({
+                'Initial Cost': '₹{:,.2f}',
+                'Annual Operating Cost': '₹{:,.2f}',
+                'Total TCO': '₹{:,.2f}',
+                'Annualized TCO': '₹{:,.2f}'
+            }), use_container_width=True)
+            
+            # Savings analysis
+            if alt_total_cost < total_present_value:
+                savings = total_present_value - alt_total_cost
+                payback_years = (alt_initial_cost - initial_total) / (annual_operating_total - alt_operating_cost)
+                st.success(f"The alternative scenario saves ₹{savings:,.2f} over the lifecycle")
+                if payback_years > 0:
+                    st.info(f"Payback period: {payback_years:.1f} years")
+            
+        # Cost Breakdown Chart
+        st.subheader("Cost Breakdown")
+        operating_present_value = total_present_value - initial_total - disposal_present_value + salvage_value
+        
+        fig_breakdown = go.Figure(data=[
+            go.Pie(labels=['Initial Investment', 'Operating Costs (PV)', 'Disposal (PV)'],
+                  values=[initial_total, operating_present_value, disposal_present_value])
+        ])
+        fig_breakdown.update_layout(title="TCO Components Distribution")
+        st.plotly_chart(fig_breakdown, use_container_width=True)
+        
+        # Annual Cost Projection
+        st.subheader("Annual Cost Projection")
+        years = list(range(life_years))
+        annual_costs = []
+        energy_costs = []
+        maintenance_costs = []
+        
+        for year in years:
+            inflation_factor = (1 + inflation_rate) ** year
+            discount_factor = 1 / (1 + discount_rate) ** year
+            
+            energy_cost = annual_energy_cost * inflation_factor * discount_factor
+            maint_cost = (maintenance_cost + labor_cost + spare_parts + consumables + other_operating) * inflation_factor * discount_factor
+            
+            energy_costs.append(energy_cost)
+            maintenance_costs.append(maint_cost)
+            annual_costs.append(energy_cost + maint_cost)
+        
+        fig_annual = go.Figure()
+        fig_annual.add_trace(go.Scatter(x=years, y=energy_costs,
+                                      name='Energy Cost', stackgroup='costs'))
+        fig_annual.add_trace(go.Scatter(x=years, y=maintenance_costs,
+                                      name='Maintenance & Other', stackgroup='costs'))
+        fig_annual.update_layout(title="Annual Costs (Present Value)",
+                               xaxis_title="Year",
+                               yaxis_title="Cost (₹)")
+        st.plotly_chart(fig_annual, use_container_width=True)
+        
+        # Key Metrics Table
+        st.subheader("Key Financial Metrics")
+        metrics_data = {
+            'Metric': [
+                'Total Initial Investment',
+                'Average Annual Operating Cost (PV)',
+                'Total Operating Cost (PV)',
+                'Disposal Cost (PV)',
+                'Total TCO',
+                'Annualized TCO'
+            ],
+            'Value': [
+                f"₹{initial_total:,.2f}",
+                f"₹{(operating_present_value/life_years):,.2f}",
+                f"₹{operating_present_value:,.2f}",
+                f"₹{disposal_present_value:,.2f}",
+                f"₹{total_present_value:,.2f}",
+                f"₹{annual_tco:,.2f}"
+            ]
+        }
+        st.dataframe(pd.DataFrame(metrics_data), use_container_width=True, hide_index=True)
+        
+        # Export Options
+        st.subheader("Export Results")
+        
+        # Prepare export data
+        export_data = {
+            "TCO_Analysis": {
+                "Parameters": {
+                    "Life_Years": life_years,
+                    "Inflation_Rate": inflation_rate,
+                    "Discount_Rate": discount_rate
+                },
+                "Initial_Costs": {
+                    "Purchase": purchase_cost,
+                    "Installation": installation_cost,
+                    "Piping": piping_cost,
+                    "Electrical": electrical_install,
+                    "Training": training_cost,
+                    "Other": other_initial,
+                    "Total": initial_total
+                },
+                "Annual_Costs": {
+                    "Energy": annual_energy_cost,
+                    "Maintenance": maintenance_cost,
+                    "Labor": labor_cost,
+                    "Spare_Parts": spare_parts,
+                    "Consumables": consumables,
+                    "Other": other_operating,
+                    "Total": annual_operating_total
+                },
+                "Results": {
+                    "Total_TCO": total_present_value,
+                    "Operating_Cost_PV": operating_present_value,
+                    "Disposal_Cost_PV": disposal_present_value,
+                    "Annualized_TCO": annual_tco
+                }
+            }
+        }
+        
+        # JSON export
+        json_str = json.dumps(export_data, indent=2)
+        st.download_button(
+            label="📥 Download TCO Analysis (JSON)",
+            data=json_str,
+            file_name=f"tco_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json"
+        )
+
 # ------------------ Life Cycle Cost Analysis Page ------------------
 if page == "Life Cycle Cost Analysis":
     st.title("💰 Life Cycle Cost Analysis")
