@@ -1862,9 +1862,13 @@ if page == "Rotating Pumps (Centrifugal etc.)":
         
         # Add operating regions if enabled
         if show_operating_regions:
-            Q_por_min, Q_por_max = bep_data['Q_por']
-            Q_aor_min, Q_aor_max = bep_data['Q_aor']
-            max_head = max(H_pump) * 1.1
+            Q_por_min, Q_por_max = bep_data.get('Q_por', (Q_bep*0.7, Q_bep*1.2))
+            Q_aor_min, Q_aor_max = bep_data.get('Q_aor', (Q_bep*0.5, Q_bep*1.3))
+            # ensure H_pump is iterable
+            try:
+                max_head = float(max(H_pump)) * 1.1
+            except Exception:
+                max_head = float(total_head_design) * 1.5
             
             # POR
             fig_sys.add_trace(go.Scatter(
