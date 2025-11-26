@@ -11,6 +11,7 @@ import json
 from datetime import datetime, timedelta
 import contextlib
 from scipy import stats, optimize
+
 # Install required packages if not already installed
 import subprocess
 import sys
@@ -956,144 +957,316 @@ def calculate_bearing_life_api610(radial_load_N, axial_load_N, rpm, bearing_size
     
     return hours
 
-def create_wear_prediction_plot(current_wear, wear_rate, max_wear_limit):
-    """Create a wear prediction plot."""
-    months = np.arange(0, 25)
-    predicted_wear = current_wear + wear_rate * months
+def api610_shaft_deflection(shaft_length_mm, shaft_diameter_mm, load_N, elastic_modulus_GPa=200):
+    """Calculate shaft deflection and compare to API 610 limits."""
+    # Convert to meters
+    L = shaft_length_mm / 1000
+    d = shaft_diameter_mm / 1000
+    E = elastic_modulus_GPa * 1e9
     
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=months, y=predicted_wear,
-        mode='lines+markers', name='Predicted Wear',
-        line=dict(color='blue')
-    ))
+    # Moment of inertia
+    I = (math.pi * d**4) / 64
     
-    # Shade the area beyond the max wear limit
-    fig.add_trace(go.Scatter(
-        x=[24, 24], y=[0, max_wear_limit],
-        mode='lines', name='Max Wear Limit',
-        line=dict(color='red', dash='dash')
-    ))
+    # Maximum deflection for simply supported beam (simplified)
+    deflection = (load_N * L**3) / (48 * E * I)
     
-    fig.update_layout(
-        title='Wear Prediction',
-        xaxis_title='Months',
-        yaxis_title='Wear (mm)',
-        yaxis=dict(range=[0, max_wear_limit * 1.2]),
-        height=400
-    )
+    # API 610 limit (typically 0.05mm at seal)
+    api_limit = 0.05/1000
     
-    return fig
+    return deflection, api_limit, deflection <= api_limit
 
-def create_operating_region_plot(Q_bep, Q_op, H_op, Q_points, H_pump, H_system):
-    """Create comprehensive operating region analysis with API 610 zones."""
-    fig = go.Figure()
+def calculate_nozzle_loads_api610(discharge_diameter_mm):
+    """Calculate allowable nozzle loads per API 610."""
+    # Base moment (simplified calculation)
+    base_moment = (discharge_diameter_mm/25.4)**3 * 1.5  # Convert to inches for calculation
     
-    # Calculate operating regions
-    Q_por_min, Q_por_max = calculate_por(Q_bep)
-    Q_aor_min, Q_aor_max = calculate_aor(Q_bep)
+    # API 610 load limits
+    limits = {
+        'Fx': base_moment * 2.0,  # N
+        'Fy': base_moment * 1.5,  # N
+        'Fz': base_moment * 1.7,  # N
+        'Mx': base_moment * 1.0,  # N·m
+        'My': base_moment * 0.5,  # N·m
+        'Mz': base_moment * 0.7   # N·m
+    }
+    return limits
+
+def api610_critical_speed_margins(first_critical_speed):
+    """Calculate critical speed margins per API 610."""
+    running_speed = 1450  # Example running speed
     
-    # Add system and pump curves
-    fig.add_trace(go.Scatter(
-        x=Q_points * 3600, y=H_system,
-        mode='lines', name='System Curve',
-        line=dict(color='blue', width=2)
-    ))
+    # API 610 requirements:
+    # - First critical speed should be at least 20% above max continuous speed
+    # - Or at least 20% below min continuous speed
+    margin_above = (first_critical_speed - running_speed) / running_speed * 100
+    margin_below = (running_speed - first_critical_speed) / running_speed * 100
     
-    fig.add_trace(go.Scatter(
-        x=Q_points * 3600, y=H_pump,
-        mode='lines', name='Pump Curve',
-        line=dict(color='red', width=2)
-    ))
+    if margin_above >= 20:
+        return True, f"Above by {margin_above:.1f}%"
+    elif margin_below >= 20:
+        return True, f"Below by {margin_below:.1f}%"
+    else:
+        return False, f"Insufficient margin: {min(margin_above, margin_below):.1f}%"
+
+def api610_testing_requirements():
+    """Return API 610 testing requirements checklist."""
+    return {
+        'Hydrostatic': {'required': True, 'pressure': '1.5 × max working pressure'},
+        'Performance': {'required': True, 'points': 'Minimum 5 points including shutoff'},
+        'NPSH': {'required': True, 'method': 'Three-point step'},
+        'Bearing Temperature': {'required': True, 'limit': '82°C maximum'},
+        'Vibration': {'required': True, 'limits': {
+            'Velocity': '3.0 mm/s RMS',
+            'Displacement': '50 micrometers peak-to-peak'
+        }},
+        'Sound Level': {'required': True, 'limit': '85 dBA at 1m'},
+        'Nozzle Load': {'required': False, 'comment': 'When specified'},
+        'Mechanical Run': {'required': True, 'duration': '4 hours minimum'}
+    }
+
+def analyze_failure_modes(pump_type, operating_conditions):
+    """Analyze potential failure modes and their probabilities."""
+    failure_modes = {
+        'Bearing Failure': {
+            'probability': 0.0,
+            'impact': 'High',
+            'mtbf_hours': 50000,
+            'warning_signs': ['High vibration', 'Increased temperature', 'Unusual noise'],
+            'preventive_actions': ['Regular lubrication', 'Alignment checks', 'Vibration monitoring']
+        },
+        'Seal Failure': {
+            'probability': 0.0,
+            'impact': 'Medium',
+            'mtbf_hours': 30000,
+            'warning_signs': ['Leakage', 'Increased temperature'],
+            'preventive_actions': ['Regular inspection', 'Flush system maintenance']
+        },
+        'Cavitation': {
+            'probability': 0.0,
+            'impact': 'High',
+            'mtbf_hours': 0,  # Calculated based on NPSH margin
+            'warning_signs': ['Noise', 'Vibration', 'Performance drop'],
+            'preventive_actions': ['Maintain NPSH margin', 'Monitor suction conditions']
+        }
+    }
     
-    # Add operating regions as colored zones
-    max_head = max(H_pump) * 1.1
+    # Update probabilities based on operating conditions
+    if operating_conditions.get('npsh_margin', 0) < 0.5:
+        failure_modes['Cavitation']['probability'] = 0.8
+    elif operating_conditions.get('npsh_margin', 0) < 1.0:
+        failure_modes['Cavitation']['probability'] = 0.4
     
-    # POR (Preferred Operating Region)
-    fig.add_trace(go.Scatter(
-        x=[Q_por_min*3600, Q_por_max*3600, Q_por_max*3600, Q_por_min*3600],
-        y=[0, 0, max_head, max_head],
-        fill='toself',
-        fillcolor='rgba(0, 255, 0, 0.1)',
-        line=dict(width=0),
-        name='POR (Preferred)',
-        showlegend=True
-    ))
+    if operating_conditions.get('temperature', 25) > 80:
+        failure_modes['Seal Failure']['probability'] += 0.3
+        failure_modes['Bearing Failure']['probability'] += 0.2
     
-    # AOR (Allowable Operating Region) - Left side
-    fig.add_trace(go.Scatter(
-        x=[Q_aor_min*3600, Q_por_min*3600, Q_por_min*3600, Q_aor_min*3600],
-        y=[0, 0, max_head, max_head],
-        fill='toself',
-        fillcolor='rgba(255, 255, 0, 0.1)',
-        line=dict(width=0),
-        name='AOR (Allowable)',
-        showlegend=True
-    ))
+    if operating_conditions.get('vibration_severity', 'Low') == 'High':
+        failure_modes['Bearing Failure']['probability'] += 0.4
     
-    # AOR (Allowable Operating Region) - Right side
-    fig.add_trace(go.Scatter(
-        x=[Q_por_max*3600, Q_aor_max*3600, Q_aor_max*3600, Q_por_max*3600],
-        y=[0, 0, max_head, max_head],
-        fill='toself',
-        fillcolor='rgba(255, 255, 0, 0.1)',
-        line=dict(width=0),
-        showlegend=False
-    ))
+    return failure_modes
+
+def optimize_maintenance_cost(equipment_cost, failure_rates, maintenance_costs):
+    """Optimize maintenance intervals for minimum total cost."""
+    from scipy.optimize import minimize
     
-    # Restricted zones (below MCSF)
-    fig.add_trace(go.Scatter(
-        x=[0, Q_aor_min*3600, Q_aor_min*3600, 0],
-        y=[0, 0, max_head, max_head],
-        fill='toself',
-        fillcolor='rgba(255, 0, 0, 0.1)',
-        line=dict(width=0),
-        name='Restricted Zone',
-        showlegend=True
-    ))
+    def total_cost_function(maintenance_interval):
+        # Annual maintenance cost
+        annual_maintenance = (maintenance_costs['preventive'] * 8760) / maintenance_interval
+        
+        # Failure probability increases with maintenance interval
+        failure_prob = 1 - np.exp(-failure_rates['base'] * maintenance_interval)
+        failure_cost = failure_prob * maintenance_costs['corrective']
+        
+        # Production loss cost
+        downtime_cost = failure_prob * maintenance_costs['downtime_per_hour'] * maintenance_costs['repair_hours']
+        
+        return annual_maintenance + failure_cost + downtime_cost
     
-    # BEP marker
-    H_bep_idx = np.argmin(np.abs(Q_points - Q_bep))
-    fig.add_trace(go.Scatter(
-        x=[Q_bep*3600],
-        y=[H_pump[H_bep_idx]],
-        mode='markers',
-        marker=dict(size=15, color='green', symbol='star'),
-        name='BEP'
-    ))
+    # Find optimal maintenance interval
+    result = minimize(total_cost_function, x0=[2000], bounds=[(100, 8760)])
     
-    # Current operating point
-    fig.add_trace(go.Scatter(
-        x=[Q_op*3600],
-        y=[H_op],
-        mode='markers',
-        marker=dict(size=12, color='orange', symbol='diamond'),
-        name='Operating Point'
-    ))
+    return {
+        'optimal_interval': result.x[0],
+        'minimum_cost': result.fun,
+        'convergence': result.success
+    }
+
+def optimize_spare_parts_inventory(parts_data, lead_time_days, service_level):
+    """Calculate optimal spare parts inventory levels."""
+    from scipy.stats import norm
     
-    # Add vertical lines for region boundaries
-    for Q_val, label, color in [
-        (Q_aor_min*3600, 'MCSF', 'red'),
-        (Q_por_min*3600, 'POR Min', 'lightgreen'),
-        (Q_bep*3600, 'BEP', 'green'),
-        (Q_por_max*3600, 'POR Max', 'lightgreen'),
-        (Q_aor_max*3600, 'AOR Max', 'orange')
-    ]:
-        fig.add_vline(x=Q_val, line_dash='dash', line_color=color,
-                     annotation_text=label, annotation_position='top',
-                     annotation_font_size=10)
+    inventory_recommendations = {}
     
-    fig.update_layout(
-        title='API 610 Operating Regions Analysis',
-        xaxis_title='Flow Rate (m³/h)',
-        yaxis_title='Head (m)',
-        hovermode='x unified',
-        height=600,
-        legend=dict(x=0.65, y=0.99, bgcolor='rgba(255,255,255,0.8)'),
-        template='plotly_white'
-    )
+    for part, data in parts_data.items():
+        # Calculate safety stock
+        z_score = norm.ppf(service_level)
+        safety_stock = z_score * np.sqrt(lead_time_days) * data['demand_std']
+        
+        # Calculate reorder point
+        reorder_point = (data['demand_rate'] * lead_time_days) + safety_stock
+        
+        # Calculate economic order quantity
+        eoq = np.sqrt((2 * data['annual_demand'] * data['order_cost']) / data['holding_cost'])
+        
+        inventory_recommendations[part] = {
+            'safety_stock': safety_stock,
+            'reorder_point': reorder_point,
+            'order_quantity': eoq,
+            'annual_cost': (eoq/2) * data['holding_cost'] + (data['annual_demand']/eoq) * data['order_cost']
+        }
     
-    return fig
+    return inventory_recommendations
+
+def run_monte_carlo_simulation(base_parameters, uncertainty_ranges, n_simulations=1000):
+    """Run Monte Carlo simulation for life cycle cost analysis."""
+    results = {
+        'total_costs': [],
+        'npv_values': [],
+        'roi_values': [],
+        'risk_metrics': {}
+    }
+    
+    for _ in range(n_simulations):
+        # Generate random variations of parameters
+        params = {
+            k: np.random.uniform(v['min'], v['max']) 
+            for k, v in uncertainty_ranges.items()
+        }
+        
+        # Calculate costs with varied parameters
+        simulation_result = calculate_life_cycle_cost(
+            initial_cost=params.get('initial_cost', base_parameters['initial_cost']),
+            power_kW=params.get('power_kW', base_parameters['power_kW']),
+            efficiency=params.get('efficiency', base_parameters['efficiency']),
+            operating_hours=params.get('operating_hours', base_parameters['operating_hours']),
+            electricity_rate=params.get('electricity_rate', base_parameters['electricity_rate']),
+            maintenance_cost=params.get('maintenance_cost', base_parameters['maintenance_cost']),
+            expected_life_years=params.get('expected_life', base_parameters['expected_life'])
+        )
+        
+        results['total_costs'].append(simulation_result['total_life_cycle_cost'])
+        results['npv_values'].append(simulation_result.get('npv', 0))
+    
+    # Calculate risk metrics
+    results['risk_metrics'] = {
+        'mean_cost': np.mean(results['total_costs']),
+        'std_dev': np.std(results['total_costs']),
+        'var_95': np.percentile(results['total_costs'], 95) - np.percentile(results['total_costs'], 5),
+        'probability_over_budget': sum(1 for x in results['total_costs'] if x > base_parameters['budget']) / n_simulations
+    }
+    
+    return results
+
+def calculate_life_cycle_cost(initial_cost, power_kW, efficiency, operating_hours_per_year,
+                            electricity_rate, maintenance_cost_per_year, expected_life_years,
+                            inflation_rate=0.03, discount_rate=0.08):
+    """Calculate detailed life cycle cost analysis for a pump system."""
+    
+    years = range(expected_life_years)
+    total_cost = initial_cost
+    annual_costs = []
+    energy_costs = []
+    maintenance_costs = []
+    
+    # Energy cost calculation
+    annual_energy_cost = power_kW * operating_hours_per_year * electricity_rate / efficiency
+    
+    for year in years:
+        # Apply inflation to operating costs
+        inflated_energy_cost = annual_energy_cost * (1 + inflation_rate)**year
+        inflated_maintenance = maintenance_cost_per_year * (1 + inflation_rate)**year
+        
+        # Calculate present value using discount rate
+        discount_factor = 1 / (1 + discount_rate)**year
+        present_value_energy = inflated_energy_cost * discount_factor
+        present_value_maintenance = inflated_maintenance * discount_factor
+        
+        energy_costs.append(present_value_energy)
+        maintenance_costs.append(present_value_maintenance)
+        annual_costs.append(present_value_energy + present_value_maintenance)
+        total_cost += present_value_energy + present_value_maintenance
+    
+    return {
+        'total_life_cycle_cost': total_cost,
+        'annual_costs': annual_costs,
+        'energy_costs': energy_costs,
+        'maintenance_costs': maintenance_costs,
+        'initial_cost': initial_cost,
+        'annual_energy_consumption_kWh': power_kW * operating_hours_per_year
+    }
+
+def analyze_pump_alternatives(base_case, alternatives):
+    """Compare multiple pump alternatives based on life cycle cost."""
+    results = []
+    
+    # Calculate base case metrics
+    base_npv = base_case['life_cycle_cost']
+    
+    for alt in alternatives:
+        savings = base_npv - alt['life_cycle_cost']
+        payback_years = alt['initial_cost'] / (base_case['annual_cost'] - alt['annual_cost']) if savings > 0 else float('inf')
+        
+        results.append({
+            'name': alt['name'],
+            'savings': savings,
+            'payback_years': payback_years,
+            'roi': (savings / alt['initial_cost'] * 100) if alt['initial_cost'] > 0 else 0,
+            'life_cycle_cost': alt['life_cycle_cost']
+        })
+    
+    return results
+
+def calculate_environmental_impact(power_kW, operating_hours, co2_per_kwh=0.5):
+    """Calculate environmental impact metrics."""
+    annual_energy = power_kW * operating_hours
+    annual_co2 = annual_energy * co2_per_kwh
+    
+    return {
+        'annual_energy_consumption': annual_energy,
+        'annual_co2_emissions': annual_co2,
+        'carbon_intensity': co2_per_kwh
+    }
+
+def optimize_maintenance_schedule(equipment_age, condition_score, failure_history=None):
+    """Generate optimized maintenance schedule based on equipment condition."""
+    if failure_history is None:
+        failure_history = []
+    
+    base_interval = 4000  # Base hours between maintenance
+    
+    # Adjust interval based on condition score (0-100)
+    if condition_score < 50:
+        interval_multiplier = 0.6
+    elif condition_score < 75:
+        interval_multiplier = 0.8
+    else:
+        interval_multiplier = 1.0
+    
+    # Adjust for equipment age
+    age_factor = max(0.6, 1 - (equipment_age / 20))  # Assume 20-year design life
+    
+    # Consider failure history
+    if len(failure_history) > 0:
+        recent_failures = sum(1 for date in failure_history if (datetime.now() - date).days < 365)
+        failure_factor = max(0.5, 1 - (recent_failures * 0.2))
+    else:
+        failure_factor = 1.0
+    
+    recommended_interval = base_interval * interval_multiplier * age_factor * failure_factor
+    
+    return {
+        'recommended_interval': recommended_interval,
+        'next_maintenance_date': datetime.now() + timedelta(hours=recommended_interval),
+        'maintenance_tasks': [
+            {'task': 'Bearing inspection', 'interval': recommended_interval * 0.5},
+            {'task': 'Seal inspection', 'interval': recommended_interval * 0.3},
+            {'task': 'Alignment check', 'interval': recommended_interval * 0.25},
+            {'task': 'Performance test', 'interval': recommended_interval * 1.0},
+            {'task': 'Vibration analysis', 'interval': recommended_interval * 0.2}
+        ]
+    }
+
+# --- END helpers ---
 
 # ------------------ TCO Calculator Page ------------------
 if page == "TCO Calculator":
@@ -1454,6 +1627,320 @@ if page == "TCO Calculator":
             mime="application/json"
         )
 
+# ------------------ Life Cycle Cost Analysis Page ------------------
+if page == "Life Cycle Cost Analysis":
+    st.title("💰 Life Cycle Cost Analysis")
+    
+    tab1, tab2, tab3, tab4 = st.tabs(["Cost Analysis", "Comparison", "Maintenance", "Reliability"])
+    
+    with tab1:
+        st.subheader("Pump System Cost Analysis")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            initial_cost = st.number_input("Initial Cost (₹)", value=100000.0, min_value=0.0)
+            power_kW = st.number_input("Power Rating (kW)", value=15.0, min_value=0.1)
+            efficiency = st.number_input("Pump Efficiency (%)", value=75.0, min_value=1.0, max_value=100.0) / 100.0
+            operating_hours = st.number_input("Annual Operating Hours", value=8000.0, min_value=0.0)
+            
+        with col2:
+            electricity_rate = st.number_input("Electricity Rate (₹/kWh)", value=10.0, min_value=0.0)
+            maintenance_cost = st.number_input("Annual Maintenance Cost (₹)", value=20000.0, min_value=0.0)
+            life_years = st.number_input("Expected Life (years)", value=20, min_value=1)
+            
+        advanced = st.expander("Advanced Parameters")
+        with advanced:
+            col3, col4 = st.columns(2)
+            with col3:
+                inflation_rate = st.number_input("Inflation Rate (%)", value=3.0, min_value=0.0, max_value=100.0) / 100.0
+            with col4:
+                discount_rate = st.number_input("Discount Rate (%)", value=8.0, min_value=0.0, max_value=100.0) / 100.0
+        
+        if st.button("Calculate Life Cycle Cost"):
+            results = calculate_life_cycle_cost(
+                initial_cost, power_kW, efficiency, operating_hours,
+                electricity_rate, maintenance_cost, life_years,
+                inflation_rate, discount_rate
+            )
+            
+            # Display results
+            st.success("Life Cycle Cost Analysis Complete")
+            
+            # Summary metrics
+            col5, col6, col7 = st.columns(3)
+            with col5:
+                st.metric("Total Life Cycle Cost", f"₹{results['total_life_cycle_cost']:,.2f}")
+            with col6:
+                annual_energy_cost = results['energy_costs'][0]
+                st.metric("First Year Energy Cost", f"₹{annual_energy_cost:,.2f}")
+            with col7:
+                st.metric("Annual Energy Use", f"{results['annual_energy_consumption_kWh']:,.0f} kWh")
+            
+            # Cost breakdown chart
+            st.subheader("Cost Breakdown")
+            total_energy = sum(results['energy_costs'])
+            total_maintenance = sum(results['maintenance_costs'])
+            total_cost = results['total_life_cycle_cost']
+            
+            fig_breakdown = go.Figure(data=[
+                go.Pie(labels=['Initial Cost', 'Energy Costs', 'Maintenance Costs'],
+                      values=[results['initial_cost'], total_energy, total_maintenance])
+            ])
+            fig_breakdown.update_layout(title="Life Cycle Cost Distribution")
+            st.plotly_chart(fig_breakdown, use_container_width=True)
+            
+            # Annual costs chart
+            st.subheader("Annual Costs Over Time")
+            years = list(range(life_years))
+            
+            fig_annual = go.Figure()
+            fig_annual.add_trace(go.Scatter(x=years, y=results['energy_costs'],
+                                          name='Energy Cost', stackgroup='costs'))
+            fig_annual.add_trace(go.Scatter(x=years, y=results['maintenance_costs'],
+                                          name='Maintenance Cost', stackgroup='costs'))
+            fig_annual.update_layout(title="Annual Costs (Present Value)",
+                                   xaxis_title="Year",
+                                   yaxis_title="Cost (₹)")
+            st.plotly_chart(fig_annual, use_container_width=True)
+            
+            # Environmental impact
+            env_impact = calculate_environmental_impact(power_kW, operating_hours)
+            st.subheader("Environmental Impact")
+            col8, col9 = st.columns(2)
+            with col8:
+                st.metric("Annual CO₂ Emissions", f"{env_impact['annual_co2_emissions']:,.0f} kg")
+            with col9:
+                st.metric("Carbon Intensity", f"{env_impact['carbon_intensity']} kg/kWh")
+    
+    with tab2:
+        st.subheader("Compare Alternatives")
+        st.write("Compare different pump options to find the most cost-effective solution.")
+        
+        # Base case (current configuration)
+        st.write("**Base Case Configuration**")
+        base_case = {
+            'life_cycle_cost': results['total_life_cycle_cost'] if 'results' in locals() else 0,
+            'annual_cost': annual_energy_cost + maintenance_cost if 'annual_energy_cost' in locals() else 0
+        }
+        
+        # Alternative configurations
+        st.write("**Alternative Configurations**")
+        num_alternatives = st.number_input("Number of alternatives to compare", min_value=1, max_value=5, value=2)
+        
+        alternatives = []
+        for i in range(num_alternatives):
+            with st.expander(f"Alternative {i+1}"):
+                alt_name = st.text_input("Name", f"Option {i+1}", key=f"alt_name_{i}")
+                alt_initial = st.number_input("Initial Cost (₹)", value=initial_cost*0.9, key=f"alt_initial_{i}")
+                alt_power = st.number_input("Power Rating (kW)", value=power_kW*0.95, key=f"alt_power_{i}")
+                alt_efficiency = st.number_input("Efficiency (%)", value=75.0, key=f"alt_eff_{i}") / 100.0
+                
+                # Calculate alternative costs
+                alt_results = calculate_life_cycle_cost(
+                    alt_initial, alt_power, alt_efficiency, operating_hours,
+                    electricity_rate, maintenance_cost*0.9, life_years,
+                    inflation_rate, discount_rate
+                )
+                
+                alternatives.append({
+                    'name': alt_name,
+                    'initial_cost': alt_initial,
+                    'life_cycle_cost': alt_results['total_life_cycle_cost'],
+                    'annual_cost': alt_results['energy_costs'][0] + maintenance_cost*0.9
+                })
+        
+        if st.button("Compare Alternatives"):
+            comparison = analyze_pump_alternatives(base_case, alternatives)
+            
+            # Create comparison table
+            comparison_data = [{
+                'Option': alt['name'],
+                'Life Cycle Cost (₹)': f"{alt['life_cycle_cost']:,.0f}",
+                'Savings vs Base (₹)': f"{alt['savings']:,.0f}",
+                'Payback (Years)': f"{alt['payback_years']:.1f}",
+                'ROI (%)': f"{alt['roi']:.1f}%"
+            } for alt in comparison]
+            
+            st.dataframe(pd.DataFrame(comparison_data), use_container_width=True)
+            
+            # Visualization of comparison
+            fig_comparison = go.Figure(data=[
+                go.Bar(name='Life Cycle Cost',
+                      x=['Base Case'] + [alt['name'] for alt in comparison],
+                      y=[base_case['life_cycle_cost']] + [alt['life_cycle_cost'] for alt in comparison])
+            ])
+            fig_comparison.update_layout(title="Life Cycle Cost Comparison",
+                                       yaxis_title="Cost (₹)")
+            st.plotly_chart(fig_comparison, use_container_width=True)
+    
+    with tab3:
+        st.subheader("Maintenance Optimization")
+        
+        col10, col11 = st.columns(2)
+        with col10:
+            equipment_age = st.number_input("Equipment Age (years)", value=0.0, min_value=0.0)
+            condition_score = st.slider("Equipment Condition Score", min_value=0, max_value=100, value=80)
+        
+        # Generate maintenance schedule
+        maintenance_schedule = optimize_maintenance_schedule(equipment_age, condition_score)
+        
+        st.write("**Recommended Maintenance Schedule**")
+        schedule_data = pd.DataFrame(maintenance_schedule['maintenance_tasks'])
+        schedule_data['interval'] = schedule_data['interval'].round(0)
+        schedule_data.columns = ['Task', 'Interval (hours)']
+        
+        st.dataframe(schedule_data, use_container_width=True)
+        
+        # Maintenance interval visualization
+        fig_maintenance = go.Figure()
+        for task in maintenance_schedule['maintenance_tasks']:
+            fig_maintenance.add_trace(go.Bar(
+                x=[task['task']],
+                y=[task['interval']],
+                name=task['task']
+            ))
+        
+        fig_maintenance.update_layout(title="Maintenance Intervals",
+                                    yaxis_title="Hours",
+                                    showlegend=False)
+        st.plotly_chart(fig_maintenance, use_container_width=True)
+        
+        # Condition-based recommendations
+        st.subheader("Condition-Based Recommendations")
+        if condition_score < 50:
+            st.warning("⚠️ Equipment condition is poor. Consider increased inspection frequency.")
+        elif condition_score < 75:
+            st.info("ℹ️ Equipment condition is fair. Maintain regular inspection schedule.")
+        else:
+            st.success("✅ Equipment condition is good. Continue preventive maintenance.")
+        
+        # Download maintenance report
+        if st.button("Generate Maintenance Report"):
+            report = {
+                'equipment_details': {
+                    'age': equipment_age,
+                    'condition_score': condition_score
+                },
+                'maintenance_schedule': maintenance_schedule,
+                'recommendations': {
+                    'next_maintenance': maintenance_schedule['next_maintenance_date'].strftime('%Y-%m-%d'),
+                    'interval_hours': maintenance_schedule['recommended_interval']
+                }
+            }
+            
+            # Convert to CSV
+            report_df = pd.DataFrame(maintenance_schedule['maintenance_tasks'])
+            csv = report_df.to_csv(index=False)
+            st.download_button(
+                label="Download Maintenance Schedule (CSV)",
+                data=csv,
+                file_name="maintenance_schedule.csv",
+                mime="text/csv"
+            )
+            
+    with tab4:  # Reliability Analysis tab
+        st.subheader("Reliability Analysis")
+        
+        # Operating conditions for failure mode analysis
+        operating_conditions = {
+            'npsh_margin': NPSH_margin if 'NPSH_margin' in locals() else 0,
+            'temperature': T if 'T' in locals() else 25,
+            'vibration_severity': vibration_severity if 'vibration_severity' in locals() else 'Low',
+            'operating_hours': operating_hours
+        }
+        
+        # Analyze failure modes
+        failure_modes = analyze_failure_modes('centrifugal', operating_conditions)
+        
+        # Display failure mode analysis
+        st.write("#### Failure Mode Analysis")
+        for mode, data in failure_modes.items():
+            with st.expander(f"{mode} - Risk Level: {data['impact']}"):
+                st.write(f"Probability: {data['probability']*100:.1f}%")
+                st.write(f"MTBF: {data['mtbf_hours']:,} hours")
+                st.write("Warning Signs:")
+                for sign in data['warning_signs']:
+                    st.write(f"- {sign}")
+                st.write("Preventive Actions:")
+                for action in data['preventive_actions']:
+                    st.write(f"- {action}")
+        
+        # Spare Parts Management
+        st.write("#### Spare Parts Inventory Management")
+        
+        # Sample parts data
+        parts_data = {
+            'Mechanical Seal': {
+                'demand_rate': 0.1,
+                'demand_std': 0.05,
+                'annual_demand': 2,
+                'order_cost': 5000,
+                'holding_cost': 1000
+            },
+            'Bearings': {
+                'demand_rate': 0.2,
+                'demand_std': 0.1,
+                'annual_demand': 4,
+                'order_cost': 2000,
+                'holding_cost': 500
+            }
+        }
+        
+        lead_time = st.number_input("Lead Time (days)", value=30, min_value=1)
+        service_level = st.slider("Service Level (%)", 80, 99, 95) / 100
+        
+        if st.button("Calculate Inventory Requirements"):
+            inventory_results = optimize_spare_parts_inventory(parts_data, lead_time, service_level)
+            
+            # Display results in a table
+            inventory_df = pd.DataFrame.from_dict(inventory_results, orient='index')
+            st.dataframe(inventory_df.round(2))
+        
+        # Monte Carlo simulation
+        st.write("#### Risk Analysis (Monte Carlo Simulation)")
+        if st.button("Run Risk Analysis"):
+            if all(var in locals() for var in ['initial_cost', 'power_kW', 'efficiency', 'operating_hours']):
+                uncertainty_ranges = {
+                    'initial_cost': {'min': initial_cost * 0.9, 'max': initial_cost * 1.1},
+                    'power_kW': {'min': power_kW * 0.95, 'max': power_kW * 1.05},
+                    'efficiency': {'min': efficiency * 0.9, 'max': efficiency * 1.1},
+                    'operating_hours': {'min': operating_hours * 0.8, 'max': operating_hours * 1.2}
+                }
+                
+                base_parameters = {
+                    'initial_cost': initial_cost,
+                    'power_kW': power_kW,
+                    'efficiency': efficiency,
+                    'operating_hours': operating_hours,
+                    'electricity_rate': electricity_rate,
+                    'maintenance_cost': maintenance_cost,
+                    'expected_life': life_years,
+                    'budget': initial_cost * 2
+                }
+                
+                simulation_results = run_monte_carlo_simulation(base_parameters, uncertainty_ranges)
+                
+                # Display simulation results
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Expected Total Cost", 
+                             f"₹{simulation_results['risk_metrics']['mean_cost']:,.2f}",
+                             f"±{simulation_results['risk_metrics']['std_dev']:,.2f}")
+                with col2:
+                    st.metric("Probability Over Budget",
+                             f"{simulation_results['risk_metrics']['probability_over_budget']*100:.1f}%")
+                
+                # Plot cost distribution
+                fig = go.Figure(data=[go.Histogram(x=simulation_results['total_costs'],
+                                                 nbinsx=50,
+                                                 name='Cost Distribution')])
+                fig.update_layout(title='Life Cycle Cost Distribution',
+                                 xaxis_title='Total Cost (₹)',
+                                 yaxis_title='Frequency')
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("Please complete the Cost Analysis section first to run the risk analysis.")
+
 # ------------------ Rotating Pumps Page ------------------
 if page == "Rotating Pumps (Centrifugal etc.)":
     st.header("🔄 Rotating Pump Sizing & Selection")
@@ -1755,7 +2242,7 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                 st.markdown("---")
                 st.subheader("🎯 Recommendations")
                 rec_col1, rec_col2 = st.columns(2)
-                with rec_col2:
+                with col2:
                     st.subheader("Process Parameters")
                     proc_params = {
                         'Design Flow (m³/h)': f"{Q_design * 3600:.2f}",
@@ -1814,455 +2301,56 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                 'NPSHr_vendor': NPSHr_vendor,
             }
 
-    with tab2:
-        st.subheader("📈 Performance Curves")
-        
-        # Control options
-        curve_options_col1, curve_options_col2, curve_options_col3 = st.columns(3)
-        
-        with curve_options_col1:
-            show_operating_regions = st.checkbox("Show Operating Regions (POR/AOR)", value=True)
-        with curve_options_col2:
-            show_trimmed_impellers = st.checkbox("Show Trimmed Impeller Curves", value=False)
-        with curve_options_col3:
-            show_4panel = st.checkbox("Show 4-Panel View", value=True)
-    
-    # Prepare operating point data
-    operating_point_data = {
-        'Q_op': Q_op,
-        'H_op': H_op
-    }
-    
-    if show_4panel:
-        # Advanced 4-panel plot
-        fig_advanced = create_advanced_performance_plot(
-            curve_data, 
-            bep_data, 
-            operating_point_data,
-            show_regions=show_operating_regions,
-            show_trimmed=show_trimmed_impellers
-        )
-        st.plotly_chart(fig_advanced, use_container_width=True)
-    else:
-        # Classic 2-panel view
-        # System vs Pump curve
-        flow_h = (Q_points * 3600).tolist()
-        
-        fig_sys = go.Figure()
-        fig_sys.add_trace(go.Scatter(
-            x=flow_h, y=H_system.tolist(),
-            mode='lines', name='System Curve',
-            line=dict(color='blue', width=3)
-        ))
-        fig_sys.add_trace(go.Scatter(
-            x=flow_h, y=H_pump.tolist(),
-            mode='lines', name='Pump Curve',
-            line=dict(color='red', width=3)
-        ))
-        
-        # Add operating regions if enabled
-        if show_operating_regions:
-            Q_por_min, Q_por_max = bep_data.get('Q_por', (Q_bep*0.7, Q_bep*1.2))
-            Q_aor_min, Q_aor_max = bep_data.get('Q_aor', (Q_bep*0.5, Q_bep*1.3))
-            # ensure H_pump is iterable
-            try:
-                max_head = float(max(H_pump)) * 1.1
-            except Exception:
-                max_head = float(total_head_design) * 1.5
-            
-            # POR
-            fig_sys.add_trace(go.Scatter(
-                x=[Q_por_min*3600, Q_por_max*3600, Q_por_max*3600, Q_por_min*3600],
-                y=[0, 0, max_head, max_head],
-                fill='toself',
-                fillcolor='rgba(0, 255, 0, 0.1)',
-                line=dict(width=0),
-                name='POR',
-                hoverinfo='skip'
-            ))
-            
-            # Add vertical lines at boundaries
-            fig_sys.add_vline(x=Q_por_min*3600, line_dash="dash", line_color="green", 
-                            annotation_text="POR Min", annotation_position="top")
-            fig_sys.add_vline(x=Q_por_max*3600, line_dash="dash", line_color="green",
-                            annotation_text="POR Max", annotation_position="top")
-            fig_sys.add_vline(x=Q_aor_min*3600, line_dash="dash", line_color="orange",
-                            annotation_text="MCSF", annotation_position="top")
-        
-        # BEP and operating point markers
-        fig_sys.add_trace(go.Scatter(
-            x=[Q_bep*3600], y=[H_bep],
-            mode='markers+text',
-            name='BEP',
-            text=['BEP'],
-            textposition='top center',
-            marker=dict(color='green', size=15, symbol='star')
-        ))
-        
-        fig_sys.add_trace(go.Scatter(
-            x=[Q_op*3600], y=[H_op],
-            mode='markers+text',
-            name='Operating Point',
-            text=['OP'],
-            textposition='bottom center',
-            marker=dict(color='orange', size=12, symbol='diamond')
-        ))
-        
-        fig_sys.update_layout(
-            title='Pump & System Curves',
-            xaxis_title='Flow Rate (m³/h)',
-            yaxis_title='Head (m)',
-            hovermode='x unified',
-            height=500
-        )
-        
-        st.plotly_chart(fig_sys, use_container_width=True)
-        
-        # Efficiency and Power plot
-        fig_perf = make_subplots(specs=[[{"secondary_y": True}]])
-        
-        fig_perf.add_trace(go.Scatter(
-            x=flow_h, y=(eff_curve*100).tolist(),
-            name='Efficiency (%)',
-            line=dict(color='green', width=3)
-        ), secondary_y=False)
-        
-        fig_perf.add_trace(go.Scatter(
-            x=flow_h, y=power_curve.tolist(),
-            name='Power (kW)',
-            line=dict(color='red', width=3)
-        ), secondary_y=True)
-        
-        # BEP marker
-        fig_perf.add_vline(
-            x=Q_bep*3600,
-            line_dash="dash",
-            line_color="green",
-            annotation_text="BEP",
-            annotation_position="top"
-        )
-        
-        fig_perf.update_xaxes(title_text='Flow Rate (m³/h)')
-        fig_perf.update_yaxes(title_text='Efficiency (%)', secondary_y=False, range=[0, 100])
-        fig_perf.update_yaxes(title_text='Power (kW)', secondary_y=True)
-        fig_perf.update_layout(
-            title='Efficiency & Power vs Flow',
-            hovermode='x unified',
-            height=500
-        )
-        
-        st.plotly_chart(fig_perf, use_container_width=True)
-    
-    # Display key curve parameters
-    st.markdown("---")
-    st.subheader("📊 Curve Characteristics")
-    
-    char_col1, char_col2, char_col3, char_col4 = st.columns(4)
-    
-    with char_col1:
-        st.metric("Shutoff Head", f"{bep_data['H_shutoff']:.2f} m")
-        shutoff_ratio = bep_data['H_shutoff'] / H_bep if H_bep > 0 else 0
-        st.caption(f"Ratio: {shutoff_ratio:.2f}x BEP head")
-    
-    with char_col2:
-        st.metric("BEP Flow", f"{Q_bep*3600:.2f} m³/h")
-        st.caption(f"Efficiency: {eff_bep*100:.1f}%")
-    
-    with char_col3:
-        Q_mcsf = bep_data['Q_mcsf']
-        st.metric("MCSF", f"{Q_mcsf*3600:.2f} m³/h")
-        st.caption(f"{(Q_mcsf/Q_bep)*100:.0f}% of BEP")
-    
-    with char_col4:
-        st.metric("Runout Flow", f"{bep_data['Q_runout']*3600:.2f} m³/h")
-        st.caption(f"{(bep_data['Q_runout']/Q_bep)*100:.0f}% of BEP")
-    
-    # Operating Point Analysis Display
-    if op_analysis:
-        st.markdown("---")
-        st.subheader("🎯 Operating Point Analysis")
-        
-        op_col1, op_col2, op_col3 = st.columns(3)
-        
-        with op_col1:
-            st.metric(
-                "Deviation from BEP",
-                f"{op_analysis['deviation_from_bep']:.1f}%"
-            )
-            
-            # Color-coded status
-            quality = op_analysis['operating_quality']
-            if quality == 'Excellent':
-                st.success(f"✅ {quality}")
-            elif quality == 'Good':
-                st.success(f"✓ {quality}")
-            elif quality == 'Fair':
-                st.warning(f"⚡ {quality}")
-            else:
-                st.error(f"⚠️ {quality}")
-        
-        with op_col2:
-            st.metric(
-                "Stability",
-                op_analysis['stability']
-            )
-            if 'stability_margin' in op_analysis:
-                st.caption(f"Margin: {op_analysis['stability_margin']:.2f}")
-            
-            if op_analysis['stability'] == 'Stable':
-                st.success("✅ Stable operation")
-            elif op_analysis['stability'] == 'Marginal':
-                st.warning("⚠️ Monitor for fluctuations")
-            else:
-                st.error("🚨 Unstable - redesign required")
-        
-        with op_col3:
-            st.metric(
-                "Efficiency Impact",
-                op_analysis['efficiency_impact']
-            )
-            if 'estimated_efficiency_loss' in op_analysis:
-                st.caption(f"Est. loss: {op_analysis['estimated_efficiency_loss']:.1f}%")
-        
-        # Recommendations
-        if op_analysis['recommendations']:
-            with st.expander("📋 Recommendations for Operating Point", expanded=True):
-                for rec in op_analysis['recommendations']:
-                    st.write(rec)
-        
-        # Multiple intersections warning
-        if op_analysis.get('multiple_intersections', False):
-            st.error("🚨 Multiple intersection points detected - system may oscillate between operating points!")
-    
-    # Trimmed impeller comparison
-    if show_trimmed_impellers:
-        st.markdown("---")
-        st.subheader("🔧 Impeller Trim Analysis")
-        
-        trim_comparison = []
-        for trim in [1.0, 0.95, 0.90, 0.85]:
-            if trim == 1.0:
-                H_trim = H_pump
-                eff_trim = eff_curve
-                power_trim = power_curve
-            else:
-                H_trim = curve_data['H_pump_trimmed'][trim]
-                eff_trim = curve_data['eff_trimmed'][trim]
-                power_trim = curve_data['power_trimmed'][trim]
-            
-            # Find intersection with system curve
-            idx_intersect = np.argmin(np.abs(H_trim - H_system))
-            Q_trim_op = Q_points[idx_intersect]
-            H_trim_op = H_trim[idx_intersect]
-            eff_trim_op = eff_trim[idx_intersect]
-            power_trim_op = power_trim[idx_intersect]
-            
-            trim_comparison.append({
-                'Trim (%)': int(trim * 100),
-                'Flow (m³/h)': Q_trim_op * 3600,
-                'Head (m)': H_trim_op,
-                'Efficiency (%)': eff_trim_op * 100,
-                'Power (kW)': power_trim_op,
-                'Deviation from BEP (%)': abs(Q_trim_op - Q_bep) / Q_bep * 100 if Q_bep > 0 else 0
-            })
-        
-        df_trim = pd.DataFrame(trim_comparison)
-        
-        # Highlight best trim
-        best_trim_idx = df_trim['Deviation from BEP (%)'].idxmin()
-        
-        st.dataframe(
-            df_trim.style.highlight_min(subset=['Deviation from BEP (%)'], color='lightgreen'),
-            use_container_width=True
-        )
-        
-        st.info(f"💡 Optimal trim: {df_trim.iloc[best_trim_idx]['Trim (%)']}% " +
-                f"(Deviation: {df_trim.iloc[best_trim_idx]['Deviation from BEP (%)']:.1f}%)")
-    
-    # Export curve data
-    st.markdown("---")
-    st.subheader("📥 Export Curve Data")
-    
-    export_col1, export_col2 = st.columns(2)
-    
-    with export_col1:
-        # Prepare comprehensive export data
-        export_data = pd.DataFrame({
-            'Flow (m³/h)': Q_points * 3600,
-            'System Head (m)': H_system,
-            'Pump Head (m)': H_pump,
-            'Efficiency (%)': eff_curve * 100,
-            'Power (kW)': power_curve,
-            'NPSH Required (m)': 2 + 0.5 * (Q_points / max(Q_points)) ** 2  # Placeholder
-        })
-        
-        csv_data = export_data.to_csv(index=False)
-        st.download_button(
-            label="📥 Download Curve Data (CSV)",
-            data=csv_data,
-            file_name=f"pump_curves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
-        )
-    
-    with export_col2:
-        # Export BEP and operating point data
-        summary_data = {
-            'Parameter': [
-                'BEP Flow (m³/h)',
-                'BEP Head (m)',
-                'BEP Efficiency (%)',
-                'Operating Flow (m³/h)',
-                'Operating Head (m)',
-                'Operating Efficiency (%)',
-                'Operating Power (kW)',
-                'Shutoff Head (m)',
-                'MCSF (m³/h)',
-                'Runout Flow (m³/h)'
-            ],
-            'Value': [
-                f"{Q_bep*3600:.2f}",
-                f"{H_bep:.2f}",
-                f"{eff_bep*100:.2f}",
-                f"{Q_op*3600:.2f}",
-                f"{H_op:.2f}",
-                f"{eff_op*100:.2f}",
-                f"{power_op:.2f}",
-                f"{H_design:.2f}",
-                f"{Q_design*3600:.2f}",
-                f"{Q_design*3600*1.3:.2f}"
-            ]
-        }
-        
-        summary_df = pd.DataFrame(summary_data)
-        summary_csv = summary_df.to_csv(index=False)
-        
-        st.download_button(
-            label="📥 Download Summary (CSV)",
-            data=summary_csv,
-            file_name=f"pump_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
-        )
+            with tab2:
+                st.subheader("Performance Curves")
 
-    with tab3:
-        st.subheader("⚙️ Advanced Analysis")
-        st.markdown("#### 📊 3D Performance Surface Analysis")
-        st.info("3D surface visualization available when running in full mode")
-        
-        st.markdown("---")
-        st.markdown("#### 🔍 Wear Prediction & Trend Analysis")
-        
-        with st.expander("Wear Trend Forecasting", expanded=True):
-            # Historical wear input
-            wear_col1, wear_col2 = st.columns(2)
-            with wear_col1:
-                st.write("**Historical Wear Data (optional)**")
-                historical_input = st.text_area(
-                    "Enter historical wear measurements (comma-separated, in mm)",
-                    value="0.1,0.2,0.3,0.4,0.5",
-                    help="Values represent wear at different time intervals"
-                )
+                # Interactive system vs pump curve (Plotly)
                 try:
-                    historical_wear_data = [float(x.strip()) for x in historical_input.split(',')]
-                except ValueError:
-                    historical_wear_data = [0.1]
-            
-            with wear_col2:
-                st.write("**Wear Parameters**")
-                max_allowable_wear = st.number_input(
-                    "Max allowable wear (mm)", 
-                    value=1.0, 
-                    min_value=0.1
-                )
-                forecast_months = st.number_input(
-                    "Forecast period (months)", 
-                    value=24, 
-                    min_value=1, 
-                    max_value=60
-                )
-            
-            # Display wear prediction plot
-            if show_wear_analysis:
-                fig_wear = create_wear_prediction_plot(
-                    current_wear=measured_clearance_mm if show_wear_analysis else 0.5,
-                    wear_rate=slurry_wear_mm_per_year / 12 if show_wear_analysis else 0.01,
-                    max_wear_limit=max_allowable_wear
-                )
-                st.plotly_chart(fig_wear, use_container_width=True)
-                    
-                    # Wear analysis summary
-                    st.markdown("##### Wear Analysis Summary")
-                    col_wear1, col_wear2, col_wear3 = st.columns(3)
-                    
-                    with col_wear1:
-                        current_life_months = (max_allowable_wear - measured_clearance_mm) / (slurry_wear_mm_per_year / 12)
-                        st.metric(
-                            "Remaining Life",
-                            f"{max(0, current_life_months):.1f} months",
-                            f"{max(0, current_life_months/12):.1f} years"
-                        )
-                    
-                    with col_wear2:
-                        st.metric(
-                            "Monthly Wear Rate",
-                            f"{slurry_wear_mm_per_year/12:.4f} mm",
-                            f"{slurry_wear_mm_per_year:.4f} mm/year"
-                        )
-                    
-                    with col_wear3:
-                        wear_margin = max_allowable_wear - measured_clearance_mm
-                        wear_used_pct = (measured_clearance_mm / max_allowable_wear) * 100
-                        st.metric(
-                            "Wear Margin Used",
-                            f"{wear_used_pct:.1f}%",
-                            f"{wear_margin:.3f} mm remaining"
-                        )
-                    
-                    # Maintenance recommendations based on wear trend
-                    st.markdown("##### Maintenance Recommendations")
-                    
-                    if wear_prediction:
-                        # Find when wear reaches critical level
-                        pred_values = wear_prediction['predicted_values']
-                        critical_months = np.where(pred_values >= max_allowable_wear)[0]
-                        
-                        if len(critical_months) > 0:
-                            months_to_critical = critical_months[0] + 12  # +12 for historical period
-                            recommendation_color = 'error' if months_to_critical < 3 else ('warning' if months_to_critical < 6 else 'success')
-                            
-                            if recommendation_color == 'error':
-                                st.error(f"⚠️ CRITICAL: Schedule maintenance within {months_to_critical} months")
-                            elif recommendation_color == 'warning':
-                                st.warning(f"⚡ Schedule maintenance within {months_to_critical} months")
-                            else:
-                                st.success(f"✅ Component has {months_to_critical} months before critical wear")
-                        else:
-                            st.info(f"ℹ️ Component acceptable for {forecast_months} month forecast period")
-                    
-                    # Download wear analysis report
-                    if st.button("Generate Wear Analysis Report"):
-                        wear_report = {
-                            'timestamp': datetime.now().isoformat(),
-                            'component': 'Impeller',
-                            'current_wear_mm': float(measured_clearance_mm),
-                            'wear_rate_mm_per_year': float(slurry_wear_mm_per_year),
-                            'wear_rate_mm_per_month': float(slurry_wear_mm_per_year/12),
-                            'max_allowable_wear_mm': float(max_allowable_wear),
-                            'remaining_life_months': float(max(0, current_life_months)),
-                            'historical_data': historical_wear_data,
-                            'forecast_months': int(forecast_months),
-                            'prediction_available': wear_prediction is not None
-                        }
-                        
-                        report_json = json.dumps(wear_report, indent=2)
-                        st.download_button(
-                            label="📥 Download Wear Analysis (JSON)",
-                            data=report_json,
-                            file_name=f"wear_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                            mime="application/json"
-                        )
+                    flow_h = (Q_points * 3600).tolist()
+                except Exception:
+                    flow_h = list(Q_points * 3600)
+
+                fig_sys = go.Figure()
+                fig_sys.add_trace(go.Scatter(x=flow_h, y=list(H_system), mode='lines', name='System Curve', line=dict(color='blue')))
+                fig_sys.add_trace(go.Scatter(x=flow_h, y=list(H_pump), mode='lines', name='Pump Curve', line=dict(color='red')))
+                # BEP and operating point markers
+                fig_sys.add_trace(go.Scatter(x=[Q_bep*3600], y=[H_pump[bep_idx]], mode='markers', name='BEP', marker=dict(color='green', size=12, symbol='star')))
+                fig_sys.add_trace(go.Scatter(x=[Q_op*3600], y=[H_op], mode='markers', name='Operating Point', marker=dict(color='orange', size=10, symbol='diamond')))
+                fig_sys.update_layout(title='Pump & System Curves', xaxis_title='Flow Rate (m³/h)', yaxis_title='Head (m)', legend=dict(orientation='h', yanchor='bottom', y=-0.25, xanchor='left', x=0))
+                fig_sys.update_xaxes(showgrid=True)
+                fig_sys.update_yaxes(showgrid=True)
+                st.plotly_chart(fig_sys, use_container_width=True)
+
+                # Efficiency and Power vs Flow (Plotly with secondary y-axis)
+                fig_perf = make_subplots(specs=[[{"secondary_y": True}]])
+                fig_perf.add_trace(go.Scatter(x=flow_h, y=(eff_curve*100).tolist(), name='Efficiency (%)', line=dict(color='green')), secondary_y=False)
+                fig_perf.add_trace(go.Scatter(x=flow_h, y=list(power_curve), name='Power (kW)', line=dict(color='red')), secondary_y=True)
+                # Vertical line for BEP
+                fig_perf.add_vline(x=Q_bep*3600, line=dict(color='green', dash='dash'), annotation_text='BEP', annotation_position='top')
+                fig_perf.update_xaxes(title_text='Flow Rate (m³/h)')
+                fig_perf.update_yaxes(title_text='Efficiency (%)', secondary_y=False, range=[0, 100])
+                fig_perf.update_yaxes(title_text='Power (kW)', secondary_y=True)
+                fig_perf.update_layout(title='Power & Efficiency vs Flow', legend=dict(orientation='h', yanchor='bottom', y=-0.25, xanchor='left', x=0))
+                st.plotly_chart(fig_perf, use_container_width=True)
+
+                # Export curve data as CSV
+                try:
+                    df_export = pd.DataFrame({
+                        'Flow (m³/h)': flow_h,
+                        'System Head (m)': list(H_system),
+                        'Pump Head (m)': list(H_pump),
+                        'Efficiency (%)': (eff_curve*100).tolist(),
+                        'Power (kW)': list(power_curve)
+                    })
+                    csv = df_export.to_csv(index=False)
+                    st.download_button(label='📥 Download Curve Data (CSV)', data=csv, file_name=f'pump_curves_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv', mime='text/csv')
+                except Exception:
+                    pass
+
+            with tab3:
+                st.subheader("⚙️ Advanced Analysis")
                 
-                st.markdown("---")
-                # API 610 Analysis Section (existing code continues...)
+                # API 610 Analysis Section
                 st.markdown("#### 📋 API 610 Compliance Analysis")
                 
                 # Calculate API 610 operating regions
@@ -2431,7 +2519,7 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                     ax.set_ylabel('Relative Amplitude')
                     ax.set_title('Rotor Dynamic Response')
                     ax.grid(True, alpha=0.3)
-                    ax.legend()
+                    ax.legend(loc='upper left')
                     
                     return fig
 
@@ -2588,6 +2676,16 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                         ax3.legend(loc='best', fontsize=8)
                     
                     plt.tight_layout()
+                    return fig
+                    if operating_hours > 0:
+                        ax.axvline(operating_hours/1000, color='y', linestyle='--', label='Annual Operation')
+                    
+                    ax.set_xlabel('Operating Time (thousands of hours)')
+                    ax.set_ylabel('Reliability (%)')
+                    ax.set_title('Bearing Life Prediction')
+                    ax.grid(True, alpha=0.3)
+                    ax.legend()
+                    
                     return fig
 
                 def create_temperature_distribution(bearing_temp_rise, ambient_temp):
@@ -2782,10 +2880,10 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                     
                     plt.tight_layout()
                     return fig
-                
+
                 def create_seal_flush_diagram(api_plan):
                     """Create a schematic of the seal flush plan."""
-                    fig, ax = plt.subplots(figsize=(8,  6))
+                    fig, ax = plt.subplots(figsize=(8, 6))
                     
                     # Basic pump outline
                     def draw_pump_outline():
@@ -2820,7 +2918,6 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                     
                     ax.set_title(f'API Flush Plan {api_plan}')
                     return fig
-                
                 seal_col1, seal_col2 = st.columns(2)
                 with seal_col1:
                     # Calculate seal chamber dimensions
@@ -2863,6 +2960,491 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                     st.write("Anchor bolt specification:")
                     st.write(f"- Diameter: {baseplate['anchor_bolt_spec']['min_diameter_mm']} mm")
                     st.write(f"- Material: {baseplate['anchor_bolt_spec']['material']}")
+
+                # Mechanical Seal Selection
+                st.markdown("---")
+                st.markdown("#### 🔒 Mechanical Seal Selection")
+                
+                # Get operating conditions for seal selection
+                pressure_bar = total_head_design * density * 9.81 / 1e5
+                fluid_properties = {
+                    'abrasive': material_type == 'Slurry',
+                    'volatile': material_type in ['Oil', 'Acids'],
+                    'toxic': material_type in ['Acids', 'Alkaline'],
+                    'crystallizing': False
+                }
+                
+                seal_recommendation = select_mechanical_seal_api610(
+                    T, pressure_bar, material_type, 
+                    pump_speed_rpm, fluid_properties
+                )
+                
+                seal_col1, seal_col2 = st.columns(2)
+                with seal_col1:
+                    st.write("**Seal Configuration:**")
+                    st.write(f"- Arrangement: {seal_recommendation['arrangement']}")
+                    st.write(f"- Seal Type: {seal_recommendation['seal_type']}")
+                    st.write(f"- Face Materials: {seal_recommendation['face_material']}")
+                    st.write(f"- Elastomer: {seal_recommendation['elastomer']}")
+                
+                with seal_col2:
+                    st.write("**API Piping Plan:**")
+                    st.write(f"- Plan: {seal_recommendation['api_plan']}")
+                    if seal_recommendation['contains_solids']:
+                        st.warning("⚠️ Solids handling features required")
+                    if seal_recommendation['arrangement'] == 'Dual pressurized':
+                        st.info("ℹ️ Barrier fluid system required")
+                    
+                    # Add seal chamber visualization
+                    chamber_fig = create_seal_chamber_diagram(seal_chamber)
+                    st.pyplot(chamber_fig)
+                    plt.close()
+                    
+                    # Add flush plan visualization
+                    flush_fig = create_seal_flush_diagram(seal_recommendation['api_plan'])
+                    st.pyplot(flush_fig)
+                    plt.close()
+                    
+                    # Add seal arrangement details
+                    st.write("\n**Seal Arrangement Details:**")
+                    seal_details = pd.DataFrame({
+                        'Parameter': [
+                            'Arrangement Type',
+                            'Face Material',
+                            'Secondary Seals',
+                            'Face Pressure',
+                            'Face Loading',
+                            'Heat Generation'
+                        ],
+                        'Specification': [
+                            seal_recommendation['arrangement'],
+                            seal_recommendation['face_material'],
+                            seal_recommendation['elastomer'],
+                            f"{pressure_bar:.1f} bar",
+                            'Hydraulically Balanced' if pressure_bar > 20 else 'Standard',
+                            f"{(shaft_kW * 0.02):.1f} kW (estimated)"
+                        ]
+                    })
+                    st.dataframe(seal_details, hide_index=True)
+
+                # Bearing Housing Cooling
+                st.markdown("---")
+                st.markdown("#### ❄️ Bearing Housing Cooling")
+                
+                # Estimate bearing temperature rise based on speed
+                bearing_temp_rise = (pump_speed_rpm/1450)**1.2 * 20
+                cooling_requirements = calculate_bearing_cooling_api610(
+                    pump_speed_rpm, bearing_temp_rise
+                )
+                
+                cooling_col1, cooling_col2 = st.columns(2)
+                with cooling_col1:
+                    st.write("**Temperature Analysis:**")
+                    st.write(f"- Estimated temp rise: {bearing_temp_rise:.1f}°C")
+                    st.write(f"- Heat load: {cooling_requirements['heat_load']:.0f} W")
+                    if cooling_requirements['cooling_required']:
+                        st.warning("⚠️ Cooling system required")
+                    else:
+                        st.success("✅ Natural cooling sufficient")
+                
+                with cooling_col2:
+                    if cooling_requirements['cooling_required']:
+                        st.write("**Cooling System:**")
+                        st.write(f"- Method: {cooling_requirements['method']}")
+                        st.write(f"- Required flow: {cooling_requirements['flow_rate']:.2f} "
+                                f"{'L/min' if cooling_requirements['method']=='Water cooling' else 'm³/min'}")
+                        
+                    # Add temperature distribution visualization
+                    temp_fig = create_temperature_distribution(bearing_temp_rise, 40)  # 40°C ambient
+                    st.pyplot(temp_fig)
+                    plt.close()
+                
+                # Add bearing life visualization
+                op_hours_for_plot = operating_hours if show_energy_cost else 8000.0
+                bearing_life_fig = create_bearing_life_plot(
+                    bearing_results['L10_hours'],
+                    bearing_results['api_minimum'],
+                    op_hours_for_plot
+                )
+                st.pyplot(bearing_life_fig)
+                plt.close()
+
+                # Material Upgrades
+                st.markdown("---")
+                st.markdown("#### 🛡️ Material Upgrade Recommendations")
+                
+                # Add visualization for material improvements
+                def create_interactive_material_analysis(current_class, recommended_class, improvements):
+                    """Create interactive material analysis with multiple visualization options."""
+                    
+                    # Material properties for different API classes
+                    material_props = {
+                        'I-1': {
+                            'max_temp': 150,
+                            'max_pressure': 20,
+                            'corrosion_resistance': 2,
+                            'erosion_resistance': 2,
+                            'relative_cost': 1
+                        },
+                        'I-2': {
+                            'max_temp': 200,
+                            'max_pressure': 40,
+                            'corrosion_resistance': 3,
+                            'erosion_resistance': 3,
+                            'relative_cost': 1.5
+                        },
+                        'S-1': {
+                            'max_temp': 350,
+                            'max_pressure': 100,
+                            'corrosion_resistance': 4,
+                            'erosion_resistance': 4,
+                            'relative_cost': 2.5
+                        },
+                        'S-6': {
+                            'max_temp': 400,
+                            'max_pressure': 150,
+                            'corrosion_resistance': 5,
+                            'erosion_resistance': 5,
+                            'relative_cost': 4
+                        }
+                    }
+                    
+                    # Create tabs for different visualizations
+                    viz_tabs = st.tabs(["Performance Comparison", "Cost-Benefit Analysis", "Operating Limits"])
+                    
+                    with viz_tabs[0]:
+                        # Radar chart for performance comparison
+                        fig_radar = plt.figure(figsize=(8, 6))
+                        ax_radar = fig_radar.add_subplot(111, projection='polar')
+                        
+                        # Parameters to compare
+                        params = ['Temperature', 'Pressure', 'Corrosion', 'Erosion', 'Cost']
+                        angles = np.linspace(0, 2*np.pi, len(params), endpoint=False)
+                        
+                        # Plot for current material
+                        current_values = [
+                            material_props[current_class]['max_temp']/400,
+                            material_props[current_class]['max_pressure']/150,
+                            material_props[current_class]['corrosion_resistance']/5,
+                            material_props[current_class]['erosion_resistance']/5,
+                            1/material_props[current_class]['relative_cost']
+                        ]
+                        current_values.append(current_values[0])
+                        angles_plot = np.concatenate((angles, [angles[0]]))
+                        
+                        ax_radar.plot(angles_plot, current_values, 'b-', label=f'Current ({current_class})')
+                        ax_radar.fill(angles_plot, current_values, alpha=0.25)
+                        
+                        # Plot for recommended material if different
+                        if recommended_class and recommended_class != current_class:
+                            recommended_values = [
+                                material_props[recommended_class]['max_temp']/400,
+                                material_props[recommended_class]['max_pressure']/150,
+                                material_props[recommended_class]['corrosion_resistance']/5,
+                                material_props[recommended_class]['erosion_resistance']/5,
+                                1/material_props[recommended_class]['relative_cost']
+                            ]
+                            recommended_values.append(recommended_values[0])
+                            ax_radar.plot(angles_plot, recommended_values, 'r-', label=f'Recommended ({recommended_class})')
+                            ax_radar.fill(angles_plot, recommended_values, alpha=0.25)
+                        
+                        ax_radar.set_xticks(angles)
+                        ax_radar.set_xticklabels(params)
+                        ax_radar.legend(loc='upper right', bbox_to_anchor=(0.1, 0.1))
+                        
+                        st.pyplot(fig_radar)
+                        plt.close()
+
+                    with viz_tabs[1]:
+                        # Cost-benefit analysis
+                        if recommended_class and recommended_class != current_class:
+                            cost_increase = material_props[recommended_class]['relative_cost'] / material_props[current_class]['relative_cost']
+                            performance_increase = (
+                                material_props[recommended_class]['corrosion_resistance'] +
+                                material_props[recommended_class]['erosion_resistance']
+                            ) / (
+                                material_props[current_class]['corrosion_resistance'] +
+                                material_props[current_class]['erosion_resistance']
+                            )
+                            
+                            fig_cost = plt.figure(figsize=(8, 4))
+                            ax_cost = fig_cost.add_subplot(111)
+                            
+                            x = np.array([1, 2])
+                            metrics = {
+                                'Cost': [1, cost_increase],
+                                'Life': [1, improvements],
+                                'Performance': [1, performance_increase]
+                            }
+                            
+                            width = 0.25
+                            for i, (metric, values) in enumerate(metrics.items()):
+                                ax_cost.bar(x + i*width - width, values, width, label=metric)
+                            
+                            ax_cost.set_xticks([1, 2])
+                            ax_cost.set_xticklabels(['Current', 'Recommended'])
+                            ax_cost.legend()
+                            ax_cost.set_ylabel('Relative Value')
+                            ax_cost.grid(True, alpha=0.3)
+                            
+                            st.pyplot(fig_cost)
+                            plt.close()
+                            
+                            # ROI Calculator
+                            st.write("**ROI Calculator**")
+                            initial_cost = st.number_input("Initial Equipment Cost (₹)", value=100000)
+                            yearly_maintenance = st.number_input("Yearly Maintenance Cost (₹)", value=10000)
+                            
+                            current_life = 10  # years
+                            improved_life = current_life * improvements
+                            
+                            roi_data = pd.DataFrame({
+                                'Metric': ['Equipment Cost (₹)', 'Annual Maintenance (₹)', 'Expected Life (years)', 'Lifetime Cost (₹)'],
+                                'Current': [
+                                    initial_cost,
+                                    yearly_maintenance,
+                                    current_life,
+                                    initial_cost + yearly_maintenance * current_life
+                                ],
+                                'Recommended': [
+                                    initial_cost * cost_increase,
+                                    yearly_maintenance / performance_increase,
+                                    improved_life,
+                                    initial_cost * cost_increase + (yearly_maintenance / performance_increase) * improved_life
+                                ]
+                            })
+                            st.dataframe(roi_data, hide_index=True)
+
+                    with viz_tabs[2]:
+                        # Operating limits visualization
+                        fig_limits = plt.figure(figsize=(8, 6))
+                        ax_limits = fig_limits.add_subplot(111)
+                        
+                        for mat_class, props in material_props.items():
+                            ax_limits.add_patch(plt.Rectangle(
+                                (0, 0),
+                                props['max_pressure'],
+                                props['max_temp'],
+                                alpha=0.3,
+                                label=f'Class {mat_class}'
+                            ))
+                        
+                        # Mark operating point
+                        pressure_bar = st.session_state.get('pressure_bar', 50)
+                        temp_c = st.session_state.get('T', 100)
+                        ax_limits.plot(pressure_bar, temp_c, 'ro', label='Operating Point')
+                        
+                        ax_limits.set_xlabel('Pressure (bar)')
+                        ax_limits.set_ylabel('Temperature (°C)')
+                        ax_limits.set_title('Operating Limits by Material Class')
+                        ax_limits.grid(True, alpha=0.3)
+                        ax_limits.legend()
+                        
+                        st.pyplot(fig_limits)
+                        plt.close()
+                        
+                        # Safety margins
+                        current_margin_temp = (material_props[current_class]['max_temp'] - temp_c) / material_props[current_class]['max_temp'] * 100
+                        current_margin_pressure = (material_props[current_class]['max_pressure'] - pressure_bar) / material_props[current_class]['max_pressure'] * 100
+                        
+                        st.write("**Safety Margins:**")
+                        margins_data = pd.DataFrame({
+                            'Parameter': ['Temperature', 'Pressure'],
+                            'Current Margin (%)': [f"{current_margin_temp:.1f}%", f"{current_margin_pressure:.1f}%"],
+                            'Status': [
+                                '✅ Adequate' if current_margin_temp >= 20 else '⚠️ Marginal' if current_margin_temp > 0 else '❌ Exceeded',
+                                '✅ Adequate' if current_margin_pressure >= 20 else '⚠️ Marginal' if current_margin_pressure > 0 else '❌ Exceeded'
+                            ]
+                        })
+                        st.dataframe(margins_data, hide_index=True)
+                    
+                    return None  # Since we're using st.pyplot directly
+
+                def create_material_comparison_chart(current_class, recommended_class, improvements):
+                    fig, ax = plt.subplots(figsize=(8, 4))
+                    
+                    properties = ['Corrosion', 'Erosion', 'Temperature', 'Pressure']
+                    current_values = [0.4, 0.4, 0.5, 0.6]  # Base material properties
+                    
+                    if recommended_class:
+                        # Enhanced properties based on recommended class
+                        recommended_values = [
+                            0.8 if 'S' in recommended_class else 0.6,
+                            0.9 if 'S-6' in recommended_class else 0.7,
+                            0.9 if 'S' in recommended_class else 0.7,
+                            0.9 if 'S' in recommended_class else 0.8
+                        ]
+                        
+                        x = np.arange(len(properties))
+                        width = 0.35
+                        
+                        ax.bar(x - width/2, current_values, width, label=f'Current ({current_class})',
+                              color='lightgray', alpha=0.7)
+                        ax.bar(x + width/2, recommended_values, width, label=f'Recommended ({recommended_class})',
+                              color='green', alpha=0.7)
+                        
+                        ax.set_xticks(x)
+                        ax.set_xticklabels(properties)
+                        ax.set_ylim(0, 1)
+                        ax.set_ylabel('Relative Performance')
+                        ax.legend()
+                        ax.grid(True, alpha=0.3)
+                        
+                        return fig
+                    return None
+                
+                # Determine if service is corrosive/erosive
+                is_corrosive = material_type in ['Acids', 'Alkaline', 'Seawater']
+                is_erosive = material_type == 'Slurry' or V > 3.0
+                
+                material_upgrades = recommend_material_upgrades_api610(
+                    'Carbon Steel',  # Base material
+                    T, pressure_bar,
+                    corrosive=is_corrosive,
+                    erosive=is_erosive
+                )
+                
+                material_col1, material_col2 = st.columns(2)
+                with material_col1:
+                    st.write("**Material Analysis:**")
+                    st.write(f"- Current class: {material_upgrades['current_class']}")
+                    if material_upgrades['recommended_class']:
+                        st.write(f"- Recommended: {material_upgrades['recommended_class']}")
+                        st.write("Upgrade reasons:")
+                        for reason in material_upgrades['reason']:
+                            st.write(f"  • {reason}")
+                    else:
+                        st.success("✅ Current material class is suitable")
+                
+                with material_col2:
+                    st.write("**Component Recommendations:**")
+                    for component, rec in material_upgrades['specific_recommendations'].items():
+                        st.write(f"- {component.title()}: {rec}")
+                    if material_upgrades['estimated_life_improvement'] > 1.0:
+                        st.info(f"🔄 Estimated life improvement: "
+                               f"{material_upgrades['estimated_life_improvement']:.1f}x")
+                
+                # Material comparison visualization
+                if material_upgrades['recommended_class']:
+                    comparison_fig = create_material_comparison_chart(
+                        material_upgrades['current_class'],
+                        material_upgrades['recommended_class'],
+                        material_upgrades['estimated_life_improvement']
+                    )
+                    if comparison_fig:
+                        st.pyplot(comparison_fig)
+                        plt.close()
+                
+                # Export capabilities for API 610 specifications
+                st.markdown("---")
+                st.markdown("#### 📤 Export API 610 Specifications")
+                
+                # Prepare export data
+                api610_export_data = {
+                    "General Information": {
+                        "Date": datetime.now().strftime("%Y-%m-%d"),
+                        "Project": "Pump Specification",
+                        "Service": material_type
+                    },
+                    "Operating Conditions": {
+                        "Flow Rate (m³/h)": Q_design * 3600,
+                        "Total Head (m)": total_head_design,
+                        "Temperature (°C)": T,
+                        "Pressure (bar)": pressure_bar,
+                        "Speed (RPM)": pump_speed_rpm
+                    },
+                    "Material Specifications": {
+                        "Current Class": material_upgrades['current_class'],
+                        "Recommended Class": material_upgrades['recommended_class'],
+                        "Upgrade Reasons": material_upgrades['reason'],
+                        "Component Recommendations": material_upgrades['specific_recommendations']
+                    },
+                    "Mechanical Seal": {
+                        "Arrangement": seal_recommendation['arrangement'],
+                        "Type": seal_recommendation['seal_type'],
+                        "Face Materials": seal_recommendation['face_material'],
+                        "API Plan": seal_recommendation['api_plan']
+                    },
+                    "Installation Specifications": {
+                        "Foundation": installation_specs['foundation'],
+                        "Grouting": installation_specs['grouting'],
+                        "Alignment": installation_specs['alignment'],
+                        "Piping Support": installation_specs['piping']
+                    }
+                }
+                
+                # Export buttons
+                export_col1, export_col2 = st.columns(2)
+                with export_col1:
+                    # JSON export
+                    json_str = json.dumps(api610_export_data, indent=2)
+                    st.download_button(
+                        label="📥 Download API 610 Specifications (JSON)",
+                        data=json_str,
+                        file_name=f"api610_specifications_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        mime="application/json"
+                    )
+                
+                with export_col2:
+                    # Create PDF report
+                    def create_api610_pdf():
+                        pdf_buffer = io.BytesIO()
+                        # Create PDF content (simplified)
+                        content = [
+                            "API 610 Pump Specifications Report",
+                            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                            "\nOperating Conditions:",
+                            f"Flow Rate: {Q_design * 3600:.2f} m³/h",
+                            f"Total Head: {total_head_design:.2f} m",
+                            f"Temperature: {T:.1f}°C",
+                            f"Pressure: {pressure_bar:.1f} bar",
+                            "\nMaterial Specifications:",
+                            f"Current Class: {material_upgrades['current_class']}",
+                            f"Recommended Class: {material_upgrades['recommended_class']}",
+                            "\nMechanical Seal:",
+                            f"Arrangement: {seal_recommendation['arrangement']}",
+                            f"API Plan: {seal_recommendation['api_plan']}"
+                        ]
+                        return '\n'.join(content).encode('utf-8')
+                    
+                    pdf_content = create_api610_pdf()
+                    st.download_button(
+                        label="📥 Download API 610 Report (PDF)",
+                        data=pdf_content,
+                        file_name=f"api610_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                        mime="text/plain"
+                    )
+
+                # Installation & Alignment
+                st.markdown("---")
+                st.markdown("#### 🔧 Installation & Alignment Specifications")
+                
+                # Installation specs have been calculated earlier
+                
+                install_col1, install_col2 = st.columns(2)
+                with install_col1:
+                    st.write("**Foundation Requirements:**")
+                    st.write(f"- Type: {installation_specs['foundation']['type']}")
+                    st.write(f"- Min. mass: {installation_specs['foundation']['minimum_mass']:.1f} tonnes")
+                    st.write(f"- Thickness: {installation_specs['foundation']['minimum_thickness']} mm")
+                    st.write(f"- Reinforcement: {installation_specs['foundation']['reinforcement']}")
+                    
+                    st.write("\n**Grouting:**")
+                    st.write(f"- Type: {installation_specs['grouting']['type']}")
+                    st.write(f"- Thickness: {installation_specs['grouting']['thickness_mm']} mm")
+                    st.write(f"- Cure time: {installation_specs['grouting']['cure_time_hours']} hours")
+                
+                with install_col2:
+                    st.write("**Alignment Tolerances:**")
+                    st.write("Cold alignment:")
+                    st.write(f"- Parallel: {installation_specs['alignment']['cold_alignment']['parallel_mm']} mm")
+                    st.write(f"- Angular: {installation_specs['alignment']['cold_alignment']['angular_mm_per_100mm']} mm/100mm")
+                    
+                    st.write("\n**Piping Support:**")
+                    st.write("Suction pipe:")
+                    st.write(f"- First support: {installation_specs['piping']['suction_support']['first_support_distance']} mm")
+                    st.write("Discharge pipe:")
+                    st.write(f"- First support: {installation_specs['piping']['discharge_support']['first_support_distance']} mm")
 
                 st.markdown("---")
                 # Continue with existing Affinity Laws Analysis
@@ -2943,124 +3525,240 @@ if page == "Rotating Pumps (Centrifugal etc.)":
                 except Exception as _err:
                     st.warning(f"Unable to build checklist: {_err}")
 
-# Sensitivity analysis
+        except Exception as e:
+            st.error(f"❌ Calculation error: {e}")
+            st.error("Please check your input values and try again.")
+
+# ------------------ System Comparison Page ------------------
+elif page == "Pump System Comparison":
+    st.header("⚖️ Pump System Comparison Tool")
+    st.write("Compare multiple pump configurations side-by-side")
+    
+    if 'comparison_data' not in st.session_state:
+        st.session_state['comparison_data'] = []
+    comparison_data = st.session_state['comparison_data']
+
+    num_systems = st.slider("Number of systems to compare", 2, 5, 2)
+
+    # Target design data to compare against
+    design_col1, design_col2 = st.columns(2)
+    with design_col1:
+        target_flow = st.number_input("Target Design Flow (m³/h)", value=100.0)
+    with design_col2:
+        target_head = st.number_input("Target Design Head (m)", value=20.0)
+
+    cols = st.columns(num_systems)
+    for i, col in enumerate(cols):
+        with col:
+            st.subheader(f"System {i+1}")
+            with st.form(f"system_{i}"):
+                name = st.text_input("System Name", value=f"System {i+1}")
+                flow = st.number_input("Flow (m³/h)", value=100.0*(i+1))
+                head = st.number_input("Head (m)", value=20.0+i*5)
+                efficiency = st.number_input("Efficiency (%)", value=70.0+i*3)
+                power = st.number_input("Power (kW)", value=10.0+i*2)
+                cost = st.number_input("Capital Cost (₹)", value=5000.0*(i+1))
+                submitted = st.form_submit_button("Add System")
+                if submitted:
+                    # Store a human-readable Design Data string for table display
+                    design_data_str = f"{flow:.1f} m³/h @ {head:.1f} m"
+                    st.session_state['comparison_data'].append({
+                        'Name': name,
+                        'Design Data': design_data_str,
+                        'Flow (m³/h)': flow,
+                        'Head (m)': head,
+                        'Efficiency (%)': efficiency,
+                        'Power (kW)': power,
+                        'Capital Cost (₹)': cost
+                    })
+                    st.rerun()
+
+    if len(comparison_data) >= 1:
+        df_comp = pd.DataFrame(comparison_data)
+        st.markdown("---")
+        st.subheader("Comparison Results")
+
+        # Show table including Design Data column
+        display_cols = ['Name', 'Design Data', 'Flow (m³/h)', 'Head (m)', 'Efficiency (%)', 'Power (kW)', 'Capital Cost (₹)']
+        st.dataframe(df_comp[display_cols], use_container_width=True)
+
+        # Manage existing systems: edit or remove
+        st.markdown("### Manage Systems")
+        for idx, item in enumerate(st.session_state['comparison_data']):
+            cols_manage = st.columns([3,1,1])
+            with cols_manage[0]:
+                st.write(f"**{item.get('Name','System')}** — {item.get('Design Data','')}")
+            with cols_manage[1]:
+                if st.button("Edit", key=f"edit_btn_{idx}"):
+                    st.session_state['_editing_index'] = idx
+                    st.experimental_rerun()
+            with cols_manage[2]:
+                if st.button("Remove", key=f"remove_btn_{idx}"):
+                    st.session_state['comparison_data'].pop(idx)
+                    # Clear any editing state if it pointed to a removed index
+                    if st.session_state.get('_editing_index', None) == idx:
+                        st.session_state.pop('_editing_index', None)
+                    st.experimental_rerun()
+
+        # If editing requested, show an edit form
+        if '_editing_index' in st.session_state:
+            edit_idx = st.session_state['_editing_index']
+            if 0 <= edit_idx < len(st.session_state['comparison_data']):
+                st.markdown(f"#### Edit System {edit_idx+1}")
+                item = st.session_state['comparison_data'][edit_idx]
+                with st.form(f"edit_form_{edit_idx}"):
+                    new_name = st.text_input("System Name", value=item.get('Name', f'System {edit_idx+1}'))
+                    new_flow = st.number_input("Flow (m³/h)", value=float(item.get('Flow (m³/h)', 100.0)))
+                    new_head = st.number_input("Head (m)", value=float(item.get('Head (m)', 20.0)))
+                    new_eff = st.number_input("Efficiency (%)", value=float(item.get('Efficiency (%)', 70.0)))
+                    new_power = st.number_input("Power (kW)", value=float(item.get('Power (kW)', 10.0)))
+                    new_cost = st.number_input("Capital Cost (₹)", value=float(item.get('Capital Cost (₹)', 5000.0)))
+                    update = st.form_submit_button("Update System")
+                    cancel = st.form_submit_button("Cancel")
+                    if update:
+                        st.session_state['comparison_data'][edit_idx] = {
+                            'Name': new_name,
+                            'Design Data': f"{new_flow:.1f} m³/h @ {new_head:.1f} m",
+                            'Flow (m³/h)': new_flow,
+                            'Head (m)': new_head,
+                            'Efficiency (%)': new_eff,
+                            'Power (kW)': new_power,
+                            'Capital Cost (₹)': new_cost
+                        }
+                        st.session_state.pop('_editing_index', None)
+                        st.experimental_rerun()
+                    if cancel:
+                        st.session_state.pop('_editing_index', None)
+                        st.experimental_rerun()
+
+        # Buttons and controls: weighted score + design-price weighting and top-N
+        col_btn1, col_ctrls = st.columns([1,2])
+        with col_btn1:
+            if st.button("Calculate Best Pump"):
+                df_work = df_comp.copy()
+                df_work['Efficiency Score'] = df_work['Efficiency (%)'] / df_work['Efficiency (%)'].max()
+                df_work['Power Score'] = 1 - (df_work['Power (kW)'] / df_work['Power (kW)'].max())
+                df_work['Cost Score'] = 1 - (df_work['Capital Cost (₹)'] / df_work['Capital Cost (₹)'].max())
+
+                weights = {'Efficiency': 0.4, 'Power': 0.35, 'Cost': 0.25}
+
+                df_work['Total Score'] = (
+                    df_work['Efficiency Score'] * weights['Efficiency'] +
+                    df_work['Power Score'] * weights['Power'] +
+                    df_work['Cost Score'] * weights['Cost']
+                )
+
+                best_pump = df_work.loc[df_work['Total Score'].idxmax()]
+                st.success(f"🏆 Recommended Pump (weighted): {best_pump['Name']}")
+
+        with col_ctrls:
+            st.markdown("#### Design vs Price Settings")
+            weight_pct = st.slider("Design weight (%)", 0, 100, 70)
+            top_n = st.number_input("Show top N matches", min_value=1, max_value=max(1, len(df_comp)), value=min(3, len(df_comp)))
+
+            if st.button("Compare by Design & Price (Top-N)"):
+                df_work = df_comp.copy()
+
+                # Compute normalized percent distance from target design
+                tf = max(abs(target_flow), 1e-6)
+                th = max(abs(target_head), 1e-6)
+
+                df_work['Flow Diff %'] = (df_work['Flow (m³/h)'] - target_flow) / tf
+                df_work['Head Diff %'] = (df_work['Head (m)'] - target_head) / th
+                df_work['Design Distance'] = np.sqrt(df_work['Flow Diff %']**2 + df_work['Head Diff %']**2)
+
+                # Normalize distance and cost to [0,1] (0 best -> 1 worst), then invert so higher is better
+                max_dist = df_work['Design Distance'].max()
+                if max_dist <= 0:
+                    df_work['Norm Dist'] = 0.0
+                else:
+                    df_work['Norm Dist'] = df_work['Design Distance'] / max_dist
+
+                max_cost = df_work['Capital Cost (₹)'].max()
+                if max_cost <= 0:
+                    df_work['Norm Cost'] = 0.0
+                else:
+                    df_work['Norm Cost'] = df_work['Capital Cost (₹)'] / max_cost
+
+                w = weight_pct / 100.0
+                df_work['Combined Score'] = w * (1 - df_work['Norm Dist']) + (1 - w) * (1 - df_work['Norm Cost'])
+
+                df_sorted = df_work.sort_values(by=['Combined Score', 'Capital Cost (₹)'], ascending=[False, True]).reset_index(drop=True)
+
+                top_n = int(min(top_n, len(df_sorted)))
+                top_matches = df_sorted.head(top_n)
+
+                best = top_matches.iloc[0]
+                # Display best and top-N table
+                st.success(f"🔎 Best match by design+price: {best['Name']}")
+                if 'Design Data' in best and best['Design Data']:
+                    design_display = best['Design Data']
+                else:
+                    design_display = f"{best['Flow (m³/h)']:.1f} m³/h @ {best['Head (m)']:.1f} m"
+                st.write(f"Design Data: {design_display}")
+                st.write(f"Capital Cost: ₹{best['Capital Cost (₹)']:,.2f}")
+
+                show_cols = ['Name', 'Design Data', 'Flow (m³/h)', 'Head (m)', 'Design Distance', 'Combined Score', 'Capital Cost (₹)']
+                st.dataframe(top_matches[show_cols].assign(**{'Design Distance': top_matches['Design Distance'].map(lambda v: f"{v:.3f}"), 'Combined Score': top_matches['Combined Score'].map(lambda v: f"{v:.3f}"), 'Capital Cost (₹)': top_matches['Capital Cost (₹)'].map(lambda v: f"₹{v:,.2f}")}), use_container_width=True)
+
+# ------------------ Life Cycle Cost Analysis Page ------------------
+elif page == "Life Cycle Cost Analysis":
+    st.header("💰 Detailed Life Cycle Cost Analysis")
+    with st.form("lcc_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Capital Costs")
+            pump_cost = st.number_input("Pump cost (₹)", value=5000.0)
+            motor_cost = st.number_input("Motor cost (₹)", value=2000.0)
+            installation_cost = st.number_input("Installation (₹)", value=1500.0)
+            st.subheader("Operating Parameters")
+            operating_hours_year = st.number_input("Hours/year", value=8000.0)
+            electricity_rate = st.number_input("Electricity (₹/kWh)", value=10.0)
+            power_kW = st.number_input("Power consumption (kW)", value=15.0)
+        with col2:
+            st.subheader("Maintenance Costs")
+            annual_maintenance = st.number_input("Annual maintenance (₹)", value=500.0)
+            major_overhaul_cost = st.number_input("Major overhaul (₹)", value=3000.0)
+            overhaul_interval_years = st.number_input("Overhaul interval (years)", value=5.0)
+            st.subheader("Analysis Period")
+            analysis_years = st.number_input("Analysis period (years)", value=15.0, min_value=1.0, max_value=30.0)
+            discount_rate = st.number_input("Discount rate (%)", value=5.0) / 100
+        
+        calculate_lcc = st.form_submit_button("Calculate Life Cycle Cost", type="primary")
+
+    if calculate_lcc:
+        years = np.arange(1, int(analysis_years) + 1)
+        initial_cost = pump_cost + motor_cost + installation_cost
+        annual_energy_cost = power_kW * operating_hours_year * electricity_rate
+        
+        capital_costs = np.zeros(len(years))
+        capital_costs[0] = initial_cost
+        energy_costs = np.ones(len(years)) * annual_energy_cost
+        maintenance_costs = np.ones(len(years)) * annual_maintenance
+        
+        overhaul_costs = np.zeros(len(years))
+        for year in years:
+            if year % overhaul_interval_years == 0:
+                overhaul_costs[year-1] = major_overhaul_cost
+        
+        total_annual_costs = capital_costs + energy_costs + maintenance_costs + overhaul_costs
+        discount_factors = 1 / (1 + discount_rate) ** years
+        npv_costs = total_annual_costs * discount_factors
+        cumulative_npv = np.cumsum(npv_costs)
+
+        st.success(f"✅ Total Life Cycle Cost (NPV): ₹{cumulative_npv[-1]:,.2f}")
+        
+        col_res1, col_res2, col_res3 = st.columns(3)
+        with col_res1:
+            st.metric("Initial Investment", f"₹{initial_cost:,.2f}")
+            st.metric("Total Energy Cost", f"₹{np.sum(energy_costs * discount_factors):,.2f}")
+        with col_res2:
+            st.metric("Total Maintenance", f"₹{np.sum(maintenance_costs * discount_factors):,.2f}")
+            st.metric("Total Overhauls", f"₹{np.sum(overhaul_costs * discount_factors):,.2f}")
+        with col_res3:
+            energy_pct = np.sum(energy_costs * discount_factors) / cumulative_npv[-1] * 100
+            st.metric("Energy % of LCC", f"{energy_pct:.1f}%")
+            st.metric("Avg Annual Cost", f"₹{cumulative_npv[-1]/analysis_years:,.2f}")
+
 st.markdown("---")
-with st.expander("🔬 Pump Curve Sensitivity Analysis"):
-    st.write("Analyze how pump performance changes with system variations")
-    
-    sensitivity_type = st.selectbox(
-        "Analysis Type",
-        ["System Resistance Variation", "Speed Variation", "Impeller Diameter Variation"]
-    )
-    
-    if sensitivity_type == "System Resistance Variation":
-        st.write("See how operating point shifts with system curve changes (e.g., valve throttling, pipe fouling)")
-        
-        # Create multiple system curves
-        resistance_factors = np.linspace(0.7, 1.3, 7)
-        
-        fig_sens = go.Figure()
-        
-        # Pump curve
-        fig_sens.add_trace(go.Scatter(
-            x=(Q_points * 3600).tolist(),
-            y=H_pump.tolist(),
-            mode='lines',
-            name='Pump Curve',
-            line=dict(color='red', width=3)
-        ))
-        
-        colors_sens = px.colors.sequential.Viridis
-        
-        for i, factor in enumerate(resistance_factors):
-            H_system_var = H_static + (H_design - H_static) * factor * (Q_points / Q_design) ** 2
-            
-            # Find operating point
-            idx_op_var = np.argmin(np.abs(H_pump - H_system_var))
-            Q_op_var = Q_points[idx_op_var]
-            H_op_var = H_pump[idx_op_var]
-            
-            fig_sens.add_trace(go.Scatter(
-                x=(Q_points * 3600).tolist(),
-                y=H_system_var.tolist(),
-                mode='lines',
-                name=f'System {factor:.1f}x',
-                line=dict(color=colors_sens[i % len(colors_sens)], width=2)
-            ))
-            
-            fig_sens.add_trace(go.Scatter(
-                x=[Q_op_var * 3600],
-                y=[H_op_var],
-                mode='markers',
-                showlegend=False,
-                marker=dict(color=colors_sens[i % len(colors_sens)], size=8)
-            ))
-        
-        fig_sens.update_layout(
-            title='System Resistance Sensitivity',
-            xaxis_title='Flow Rate (m³/h)',
-            yaxis_title='Head (m)',
-            height=500
-        )
-        
-        st.plotly_chart(fig_sens, use_container_width=True)
-    
-    elif sensitivity_type == "Speed Variation":
-        st.write("See how performance changes with pump speed (VFD applications)")
-        
-        speed_factors = np.linspace(0.7, 1.1, 5)
-        
-        fig_speed = go.Figure()
-        
-        colors_speed = px.colors.sequential.Plasma
-        
-        for i, factor in enumerate(speed_factors):
-            # Affinity laws
-            Q_adj = Q_points * factor
-            H_adj = H_pump * (factor ** 2)
-            power_adj = power_curve * (factor ** 3)
-            
-            fig_speed.add_trace(go.Scatter(
-                x=(Q_adj * 3600).tolist(),
-                y=H_adj.tolist(),
-                mode='lines',
-                name=f'{int(pump_speed_rpm * factor)} RPM',
-                line=dict(color=colors_speed[i % len(colors_speed)], width=2)
-            ))
-        
-        # Original system curve
-        fig_speed.add_trace(go.Scatter(
-            x=(Q_points * 3600).tolist(),
-            y=H_system.tolist(),
-            mode='lines',
-            name='System Curve',
-            line=dict(color='blue', width=3, dash='dash')
-        ))
-        
-        fig_speed.update_layout(
-            title='Speed Variation Analysis (Affinity Laws)',
-            xaxis_title='Flow Rate (m³/h)',
-            yaxis_title='Head (m)',
-            height=500
-        )
-        
-        st.plotly_chart(fig_speed, use_container_width=True)
-        
-        # Power savings table
-        st.subheader("Power Savings with VFD")
-        power_savings = []
-        
-        for factor in speed_factors:
-            power_factor = factor ** 3
-            power_saved = (1 - power_factor) * 100
-            
-            power_savings.append({
-                'Speed (%)': f"{factor*100:.0f}",
-                'Speed (RPM)': f"{pump_speed_rpm * factor:.0f}",
-                'Power (%)': f"{power_factor*100:.0f}",
-                'Power Savings (%)': f"{power_saved:.1f}",
-                'Annual Savings (₹)': f"{annual_cost * power_saved / 100:,.0f}" if show_energy_cost else "N/A"
-            })
-        
-        df_power = pd.DataFrame(power_savings)
-        st.dataframe(df_power, use_container_width=True)
+st.caption("⚠️ Engineering estimates only. Validate with vendor data before procurement.")
