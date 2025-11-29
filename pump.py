@@ -214,22 +214,30 @@ def colebrook_brent_like(Re, eps_abs, D, tol=1e-12, maxiter=100):
 
 @st.cache_data
 def colebrook_f(Re, D, eps_abs, method='brent', tol=1e-6, max_iter=100):
-    """Unified Colebrook friction-factor solver."""
-    if Re <= 0 or D <= 0:
-        return np.nan
     if Re < 2300:
-        return 64.0 / Re
+        return 64.0 / max(Re, 1e-6)
+    
+    if D <= 0 or Re <= 0:
+        return np.nan
 
-    method = (method or 'brent').lower()
-    if method.startswith('swamee'):
-        try:
-            return 0.25 / (math.log10(eps_abs/(3.7*D) + 5.74/(Re**0.9)) ** 2)
-        except Exception:
-            return 0.02
-    elif method.startswith('newton'):
-        return colebrook_newton(Re, eps_abs, D, tol=min(tol,1e-8), maxiter=max_iter)
-    else:
-        return colebrook_brent_like(Re, eps_abs, D, tol=min(tol,1e-8), maxiter=max_iter)
+    rel_rough = eps_abs / D
+    
+    try:
+        f_guess = 0.25 / (math.log10(rel_rough / 3.7 + 5.74 / (Re ** 0.9)) ** 2)
+    except (ValueError, ZeroDivisionError):
+        f_guess = 0.02
+
+    def func(x):
+        return x + 2.0 * math.log10(rel_rough / 3.7 + 2.51 * x / Re)
+
+    try:
+        sol = optimize.root_scalar(func, bracket=[0.1, 100], method='brentq', xtol=tol)
+        if sol.converged:
+            return 1.0 / (sol.root ** 2)
+        else:
+            return f_guess
+    except Exception:
+        return f_guess
 
 def darcy_head_loss(f, L, D, V, g=9.81):
     """Calculate head loss using Darcy-Weisbach equation"""
@@ -287,17 +295,27 @@ def calculate_suction_specific_speed(N, Q, NPSHr):
 
 @st.cache_data
 def generate_pump_curves(Q_design, H_design, H_static):
-    """Generate pump and system curves"""
-    Q_points = np.linspace(0, Q_design * 1.5, 50)
-    # System curve (parabolic)
-    H_system = H_static + (H_design - H_static) * (Q_points / Q_design) ** 2
-    # Pump curve (polynomial fit)
-    H_pump = H_design * (1.2 - 0.4 * (Q_points / Q_design) ** 2)
-    # Efficiency curve (parabolic with peak)
-    eff_curve = 0.7 * (1 - 0.3 * ((Q_points / Q_design) - 1) ** 2)
-    eff_curve = np.clip(eff_curve, 0.3, 0.85)
-    # Power curve
-    power_curve = (1000 * 9.81 * Q_points * H_pump) / (eff_curve * 1000)
+    Q_points = np.linspace(0, Q_design * 1.5, 100)
+    
+    if Q_design > 0:
+        K_sys = (H_design - H_static) / (Q_design ** 2)
+    else:
+        K_sys = 0
+        
+    H_system = H_static + K_sys * (Q_points ** 2)
+    
+    H_shutoff = H_design * 1.2
+    B_pump = (H_shutoff - H_design) / (Q_design ** 2) if Q_design > 0 else 0
+    H_pump = H_shutoff - B_pump * (Q_points ** 2)
+    
+    peak_eff = 0.75 
+    eff_curve = peak_eff * (1 - 0.8 * ((Q_points - Q_design) / Q_design) ** 2)
+    eff_curve = np.clip(eff_curve, 0.1, 0.85)
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        power_curve = (1000 * 9.81 * Q_points * H_pump) / (eff_curve * 1000)
+        power_curve = np.nan_to_num(power_curve, nan=0.0, posinf=0.0)
+    
     return Q_points, H_system, H_pump, eff_curve, power_curve
 
 def compute_bep(Q_points, eff_curve):
@@ -633,26 +651,20 @@ def calculate_bearing_cooling_api610(shaft_speed_rpm, bearing_temp_rise, ambient
     cooling_req['heat_load'] = bearing_power_loss
     return cooling_req
 
-def recommend_material_upgrades_api610(base_material, temperature_C, pressure_bar, 
-                                     corrosive=False, erosive=False):
-    """Provide material upgrade recommendations based on API 610."""
-    upgrades = {
-        'current_class': '',
-        'recommended_class': '',
-        'reason': [],
-        'estimated_life_improvement': 1.0,
-        'specific_recommendations': {}
-    }
-    
-    # Base material class identification
-    if base_material == 'Cast Iron':
-        upgrades['current_class'] = 'I-1'
-    elif base_material == 'Carbon Steel':
-        upgrades['current_class'] = 'I-2'
-    elif base_material == '12% Chrome':
-        upgrades['current_class'] = 'S-1'
-    elif base_material == 'Duplex SS':
-        upgrades['current_class'] = 'S-6'
+def api610_material_class(temperature_C, pressure_bar):
+    rules = [
+        (lambda t, p: t <= 150 and p <= 20,  "I-1", "Cast Iron"),
+        (lambda t, p: t <= 200 and p <= 40,  "I-2", "Carbon Steel"),
+        (lambda t, p: t <= 350 and p <= 100, "S-1", "12% Chrome"),
+        (lambda t, p: t <= 400 and p <= 150, "S-6", "12% Cr / 12% Cr"),
+        (lambda t, p: t > 400 or p > 150,    "S-8", "Austenitic Stainless Steel"),
+    ]
+
+    for condition, class_code, desc in rules:
+        if condition(temperature_C, pressure_bar):
+            return class_code, desc
+            
+    return "Custom", "Special Alloy Required"
     
     # Temperature-based upgrades
     if temperature_C > 150 and upgrades['current_class'] in ['I-1', 'I-2']:
@@ -1350,91 +1362,65 @@ if page == "TCO Calculator":
             alt_efficiency = st.number_input("Alternative Efficiency (%)", value=85.0, min_value=0.0, max_value=100.0) / 100
             alt_life_years = st.number_input("Alternative Life Expectancy (years)", value=life_years + 5, min_value=1)
     
-    if st.button("Calculate TCO"):
-        # Calculate TCO with Monte Carlo simulation if risk analysis is enabled
-        n_simulations = 1000 if maintenance_variation > 0 or energy_cost_variation > 0 or lifetime_variation > 0 else 1
+        if st.button("Calculate TCO"):
+        n_sims = 10000 if (maintenance_variation > 0 or energy_cost_variation > 0 or lifetime_variation > 0) else 1
         
-        simulation_results = []
-        baseline_efficiency = 1.0
+        rng = np.random.default_rng()
         
-        for sim in range(n_simulations):
-            # Initialize simulation variables
-            total_operating_cost = 0
-            total_present_value = initial_total
-            current_efficiency = baseline_efficiency
-            
-            # Randomize parameters for this simulation
-            sim_life_years = max(1, life_years + np.random.randint(-lifetime_variation, lifetime_variation + 1))
-            sim_maintenance = maintenance_cost * (1 + np.random.uniform(-maintenance_variation, maintenance_variation))
-            sim_energy_rate = electricity_rate * (1 + np.random.uniform(-energy_cost_variation, energy_cost_variation))
-            
-            maintenance_schedule = []
-            if enable_predictive:
-                # Generate maintenance schedule
-                months_between = maintenance_interval
-                next_maintenance = months_between
-                while next_maintenance < sim_life_years * 12:
-                    maintenance_schedule.append(next_maintenance / 12)  # Convert to years
-                    next_maintenance += months_between
-            
-            for year in range(1, sim_life_years + 1):
-                # Apply efficiency degradation
-                if enable_predictive and year in maintenance_schedule:
-                    current_efficiency = min(baseline_efficiency, current_efficiency + maintenance_improvement)
-                else:
-                    current_efficiency *= (1 - annual_efficiency_loss)
-                
-                # Calculate costs with efficiency factor
-                energy_cost = annual_energy_cost * (1 / current_efficiency)
-                maintenance_base = sim_maintenance + labor_cost + spare_parts + consumables + other_operating
-                
-                # Apply different inflation rates
-                inflated_energy = energy_cost * (1 + inflation_rate) ** year
-                inflated_maintenance = maintenance_base * (1 + maintenance_inflation) ** year
-                
-                # Calculate present value
-                present_value = (inflated_energy + inflated_maintenance) / (1 + discount_rate) ** year
-                total_present_value += present_value * reliability_factor
-                total_operating_cost += inflated_energy + inflated_maintenance
-            
-            # Add disposal cost and subtract salvage value (present values)
-            end_year_factor = 1 / (1 + discount_rate) ** sim_life_years
-            disposal_present_value = disposal_cost * end_year_factor
-            salvage_present_value = salvage_value * end_year_factor
-            total_present_value = total_present_value + disposal_present_value - salvage_present_value
-            
-            simulation_results.append(total_present_value)
+        sim_life_years = np.maximum(1, life_years + rng.integers(-lifetime_variation, lifetime_variation + 1, size=n_sims))
+        max_life_horizon = np.max(sim_life_years)
         
-        # Calculate statistics from simulation results
+        sim_maint_factor = 1 + rng.uniform(-maintenance_variation, maintenance_variation, size=n_sims)
+        sim_energy_factor = 1 + rng.uniform(-energy_cost_variation, energy_cost_variation, size=n_sims)
+        
+        years_matrix = np.arange(1, max_life_horizon + 1)
+        
+        active_mask = years_matrix <= sim_life_years[:, None]
+        
+        eff_factors = (1 - annual_efficiency_loss) ** (years_matrix - 1)
+        
+        base_maint_total = (maintenance_cost + labor_cost + spare_parts + consumables + other_operating)
+        
+        yearly_energy = (
+            (annual_energy_cost * sim_energy_factor[:, None]) * (1 / eff_factors) * ((1 + inflation_rate) ** years_matrix) * ((1 + discount_rate) ** -years_matrix)
+        )
+        
+        yearly_maint = (
+            (base_maint_total * sim_maint_factor[:, None]) * ((1 + maintenance_inflation) ** years_matrix) * ((1 + discount_rate) ** -years_matrix)
+        )
+        
+        total_operating_pv = np.sum((yearly_energy + yearly_maint) * active_mask, axis=1)
+        
+        end_factors = (1 + discount_rate) ** -sim_life_years
+        eol_pv = (disposal_cost * end_factors) - (salvage_value * end_factors)
+        
+        simulation_results = (initial_total + total_operating_pv * reliability_factor + eol_pv)
+        
         total_present_value = np.mean(simulation_results)
         tco_std_dev = np.std(simulation_results)
         tco_percentiles = np.percentile(simulation_results, [10, 50, 90])
         
-        # Display Results with Risk Analysis
         st.success("TCO Analysis Complete")
         
-        # Summary Metrics with Risk Analysis
         col7, col8, col9 = st.columns(3)
         with col7:
             st.metric("Total Cost of Ownership", f"₹{total_present_value:,.2f}")
-            if n_simulations > 1:
+            if n_sims > 1:
                 st.caption(f"±₹{tco_std_dev:,.2f} std dev")
         with col8:
             st.metric("Initial Investment", f"₹{initial_total:,.2f}")
-            if n_simulations > 1:
+            if n_sims > 1:
                 st.caption(f"P90: ₹{tco_percentiles[2]:,.2f}")
         with col9:
             annual_tco = total_present_value / life_years
             st.metric("Annualized TCO", f"₹{annual_tco:,.2f}")
-            if n_simulations > 1:
+            if n_sims > 1:
                 st.caption(f"P10: ₹{tco_percentiles[0]:,.2f}")
         
-        # Risk Analysis Results
-        if n_simulations > 1:
+        if n_sims > 1:
             st.subheader("Risk Analysis")
             risk_col1, risk_col2 = st.columns(2)
             with risk_col1:
-                # Histogram of simulation results
                 fig_hist = go.Figure(data=[go.Histogram(x=simulation_results, nbinsx=30)])
                 fig_hist.update_layout(
                     title="TCO Distribution",
@@ -1444,7 +1430,6 @@ if page == "TCO Calculator":
                 st.plotly_chart(fig_hist, use_container_width=True)
             
             with risk_col2:
-                # Risk metrics table
                 risk_metrics = pd.DataFrame({
                     'Metric': ['Mean TCO', 'Standard Deviation', 'P10 Value', 'P50 Value', 'P90 Value'],
                     'Value': [
@@ -1457,13 +1442,20 @@ if page == "TCO Calculator":
                 })
                 st.dataframe(risk_metrics, use_container_width=True, hide_index=True)
         
-        # Efficiency Analysis
         if enable_predictive:
             st.subheader("Efficiency Analysis")
             eff_years = list(range(life_years + 1))
             eff_values = []
             baseline = 1.0
             current = baseline
+            
+            maintenance_schedule = []
+            if enable_predictive:
+                months_between = maintenance_interval
+                next_maintenance = months_between
+                while next_maintenance < life_years * 12:
+                    maintenance_schedule.append(next_maintenance / 12)
+                    next_maintenance += months_between
             
             for year in eff_years:
                 if year > 0:
@@ -1484,11 +1476,9 @@ if page == "TCO Calculator":
             )
             st.plotly_chart(fig_eff, use_container_width=True)
         
-        # Comparative Analysis
         if 'alt_initial_cost' in locals() and 'alt_operating_cost' in locals():
             st.subheader("Comparative Analysis")
             
-            # Calculate alternative TCO
             alt_total_cost = alt_initial_cost
             for year in range(1, alt_life_years + 1):
                 alt_present_value = alt_operating_cost * (1 + inflation_rate) ** year / (1 + discount_rate) ** year
@@ -1503,7 +1493,6 @@ if page == "TCO Calculator":
                 'Annualized TCO': [total_present_value/life_years, alt_total_cost/alt_life_years]
             })
             
-            # Display comparison
             st.dataframe(comparison_data.style.format({
                 'Initial Cost': '₹{:,.2f}',
                 'Annual Operating Cost': '₹{:,.2f}',
@@ -1511,7 +1500,6 @@ if page == "TCO Calculator":
                 'Annualized TCO': '₹{:,.2f}'
             }), use_container_width=True)
             
-            # Savings analysis
             if alt_total_cost < total_present_value:
                 savings = total_present_value - alt_total_cost
                 payback_years = (alt_initial_cost - initial_total) / (annual_operating_total - alt_operating_cost)
@@ -1519,9 +1507,10 @@ if page == "TCO Calculator":
                 if payback_years > 0:
                     st.info(f"Payback period: {payback_years:.1f} years")
             
-        # Cost Breakdown Chart
         st.subheader("Cost Breakdown")
-        operating_present_value = total_present_value - initial_total - disposal_present_value + salvage_value
+        disposal_present_value = disposal_cost / (1 + discount_rate) ** life_years
+        salvage_present_value = salvage_value / (1 + discount_rate) ** life_years
+        operating_present_value = total_present_value - initial_total - disposal_present_value + salvage_present_value
         
         fig_breakdown = go.Figure(data=[
             go.Pie(labels=['Initial Investment', 'Operating Costs (PV)', 'Disposal (PV)'],
@@ -1530,7 +1519,6 @@ if page == "TCO Calculator":
         fig_breakdown.update_layout(title="TCO Components Distribution")
         st.plotly_chart(fig_breakdown, use_container_width=True)
         
-        # Annual Cost Projection
         st.subheader("Annual Cost Projection")
         years = list(range(life_years))
         annual_costs = []
@@ -1558,7 +1546,6 @@ if page == "TCO Calculator":
                                yaxis_title="Cost (₹)")
         st.plotly_chart(fig_annual, use_container_width=True)
         
-        # Key Metrics Table
         st.subheader("Key Financial Metrics")
         metrics_data = {
             'Metric': [
@@ -1580,10 +1567,8 @@ if page == "TCO Calculator":
         }
         st.dataframe(pd.DataFrame(metrics_data), use_container_width=True, hide_index=True)
         
-        # Export Options
         st.subheader("Export Results")
         
-        # Prepare export data
         export_data = {
             "TCO_Analysis": {
                 "Parameters": {
@@ -1611,21 +1596,23 @@ if page == "TCO Calculator":
                 },
                 "Results": {
                     "Total_TCO": total_present_value,
-                    "Operating_Cost_PV": operating_present_value,
-                    "Disposal_Cost_PV": disposal_present_value,
-                    "Annualized_TCO": annual_tco
+                    "Annualized_TCO": annual_tco,
+                    "Standard_Deviation": tco_std_dev if n_sims > 1 else 0,
+                    "P10": tco_percentiles[0] if n_sims > 1 else total_present_value,
+                    "P50": tco_percentiles[1] if n_sims > 1 else total_present_value,
+                    "P90": tco_percentiles[2] if n_sims > 1 else total_present_value
                 }
             }
         }
         
-        # JSON export
         json_str = json.dumps(export_data, indent=2)
         st.download_button(
-            label="📥 Download TCO Analysis (JSON)",
+            label="Download TCO Analysis (JSON)",
             data=json_str,
             file_name=f"tco_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
             mime="application/json"
         )
+
 
 # ------------------ Life Cycle Cost Analysis Page ------------------
 if page == "Life Cycle Cost Analysis":
