@@ -1362,7 +1362,7 @@ if page == "TCO Calculator":
             alt_efficiency = st.number_input("Alternative Efficiency (%)", value=85.0, min_value=0.0, max_value=100.0) / 100
             alt_life_years = st.number_input("Alternative Life Expectancy (years)", value=life_years + 5, min_value=1)
     
-        if st.button("Calculate TCO"):
+    if st.button("Calculate TCO"):
         n_sims = 10000 if (maintenance_variation > 0 or energy_cost_variation > 0 or lifetime_variation > 0) else 1
         
         rng = np.random.default_rng()
@@ -1612,6 +1612,7 @@ if page == "TCO Calculator":
             file_name=f"tco_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
             mime="application/json"
         )
+
 
 
 # ------------------ Life Cycle Cost Analysis Page ------------------
